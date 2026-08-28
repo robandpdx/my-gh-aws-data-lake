@@ -4,6 +4,26 @@ This deployment guide outlines the infrastructure architecture and setup steps r
 
 ---
 
+## 🏛️ Architecture Overview
+
+```
+[GitHub Enterprise/Org] 
+       │ (JSON Webhook Payload over HTTPS)
+       ▼
+[Amazon API Gateway] 
+       │ (Authenticates, validates, & routes directly)
+       ▼
+[Amazon Data Firehose] 
+       │ (Buffers data & converts format using AWS Glue Schema)
+       ▼
+[Amazon S3 Bucket] (Partitioned Parquet files: year=YYYY/month=MM/day=DD/)
+       │
+       ▼
+[Amazon Athena] (Query raw logs seamlessly using SQL)
+```
+
+---
+
 ## 📦 Infrastructure Component Breakdown
 
 The pipeline leverages a completely serverless architecture to process high-throughput webhook streams efficiently without provisioning underlying servers:
@@ -33,13 +53,14 @@ The pipeline leverages a completely serverless architecture to process high-thro
 ## 🚀 Deployment Instructions
 
 ### 1. Execute the Infrastructure Deployment
-Deploy the infrastructure template via the AWS CloudFormation Console or execute the deployment directly using the AWS Command Line Interface (CLI):
+From the repository root, validate and build the template, then deploy it using the AWS SAM CLI. The guided deployment saves your selections for future `sam deploy` commands:
 
 ```bash
-aws cloudformation deploy \
-  --template-file generated/github_webhooks_infrastructure.yml \
-  --stack-name github-webhook-parquet-pipeline \
-  --parameter-overrides Environment=prod \
+sam validate --lint
+sam build
+sam deploy --guided \
+  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --parameter-overrides Environment=dev \
   --capabilities CAPABILITY_IAM
 ```
 
