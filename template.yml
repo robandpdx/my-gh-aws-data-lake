@@ -86,7 +86,23 @@ Resources:
           - Name: day
             Type: string
 
-  # 4. IAM Role for Firehose
+  # 4. CloudWatch Logs for Firehose delivery errors
+  FirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/github-webhooks-parquet-stream-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: owner
+          Value: !Ref owner
+
+  FirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FirehoseLogGroup
+      LogStreamName: S3Delivery
+
+  # 5. IAM Role for Firehose
   FirehoseRole:
     Type: AWS::IAM::Role
     Properties:
@@ -126,12 +142,12 @@ Resources:
               - Effect: Allow
                 Action:
                   - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*"
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${FirehoseLogGroup}:log-stream:${FirehoseLogStream}"
       Tags:
         - Key: owner
           Value: !Ref owner
 
-  # 5. Amazon Data Firehose Delivery Stream
+  # 6. Amazon Data Firehose Delivery Stream
   FirehoseDeliveryStream:
     Type: AWS::KinesisFirehose::DeliveryStream
     Properties:
@@ -148,6 +164,10 @@ Resources:
         BufferingHints:
           IntervalInSeconds: 300
           SizeInMBs: 64
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseLogGroup
+          LogStreamName: !Ref FirehoseLogStream
         CompressionFormat: UNCOMPRESSED # Format conversion handles its own internal Parquet compression (Snappy)
         DataFormatConversionConfiguration:
           Enabled: true
@@ -164,7 +184,7 @@ Resources:
             Region: !Ref AWS::Region
             VersionId: LATEST
 
-  # 6. IAM Role for API Gateway to write directly to Firehose
+  # 7. IAM Role for API Gateway to write directly to Firehose
   ApiGatewayFirehoseRole:
     Type: AWS::IAM::Role
     Properties:
@@ -188,7 +208,7 @@ Resources:
         - Key: owner
           Value: !Ref owner
 
-  # 7. Amazon API Gateway (REST API)
+  # 8. Amazon API Gateway (REST API)
   WebhookApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
@@ -259,3 +279,6 @@ Outputs:
   GlueDatabaseName:
     Value: !Ref GlueDatabase
     Description: "The name of your Glue database for Athena queries"
+  FirehoseLogGroupName:
+    Value: !Ref FirehoseLogGroup
+    Description: "The CloudWatch log group containing Firehose delivery errors"
