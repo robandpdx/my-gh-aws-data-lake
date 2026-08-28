@@ -238,22 +238,39 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:firehose:action/PutRecord"
         Credentials: !GetAtt ApiGatewayFirehoseRole.Arn
+        PassthroughBehavior: NEVER
         RequestTemplates:
           application/json: !Sub |
             {
               "DeliveryStreamName": "${FirehoseDeliveryStream}",
               "Record": {
-                "Data": "$util.base64Encode($util.escapeJavaScript($input.json('$'))\n)"
+                "Data": "$util.base64Encode($input.body)"
+              }
+            }
+          application/x-www-form-urlencoded: !Sub |
+            #set($encodedPayload = $input.body.substring(8))
+            #set($payload = $util.urlDecode($encodedPayload))
+            {
+              "DeliveryStreamName": "${FirehoseDeliveryStream}",
+              "Record": {
+                "Data": "$util.base64Encode($payload)"
               }
             }
         IntegrationResponses:
+          - StatusCode: '500'
+            SelectionPattern: '4\d{2}|5\d{2}'
+            ResponseTemplates:
+              application/json: '{"status": "error"}'
           - StatusCode: '200'
             ResponseTemplates:
               application/json: '{"status": "success"}'
       MethodResponses:
         - StatusCode: '200'
+        - StatusCode: '500'
 
-  WebhookDeployment:
+  # API Gateway deployments are immutable snapshots. Bump this logical ID when
+  # the method or integration changes so CloudFormation publishes a new snapshot.
+  WebhookDeploymentV3:
     Type: AWS::ApiGateway::Deployment
     DependsOn: WebhookPostMethod
     Properties:
@@ -262,7 +279,7 @@ Resources:
   WebhookStage:
     Type: AWS::ApiGateway::Stage
     Properties:
-      DeploymentId: !Ref WebhookDeployment
+      DeploymentId: !Ref WebhookDeploymentV3
       RestApiId: !Ref WebhookApi
       StageName: !Ref Environment
       Tags:

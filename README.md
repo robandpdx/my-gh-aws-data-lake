@@ -78,17 +78,31 @@ Once the deployment status shows `CREATE_COMPLETE`:
 6. **Trigger Events:** Choose either "Send me everything" or select specific targeted operational event flags (such as `push`, `pull_request`, or `workflow_job`).
 7. Click **Add webhook** to activate real-time stream ingestion.
 
+### Troubleshooting: GitHub Shows Success but S3 Is Empty
+
+* Allow up to **5 minutes** for low-volume traffic to appear. The Firehose stream
+  flushes after 300 seconds or 64 MiB, whichever comes first.
+* Successful Parquet files are written below `webhooks/`. Records that reach
+  Firehose but cannot be converted are written below `webhooks-errors/`, with
+  details in the `FirehoseLogGroupName` CloudFormation output.
+* The endpoint accepts both GitHub content types: `application/json` and
+  `application/x-www-form-urlencoded`. Other content types receive HTTP 415.
+* Firehose service errors are returned as non-2xx responses so GitHub marks the
+  delivery as failed instead of displaying a false success.
+
 ### 4. Initialize Data Partition Catalog Refreshes
 Once the pipeline has captured its first set of live incoming events and deposited Parquet blocks into the S3 bucket, synchronize the AWS Glue table structural directory map:
 1. Open the **Amazon Athena Console**.
-2. Run the partition repair execution statement against your environment database:
+2. Use the database shown by the `GlueDatabaseName` CloudFormation output, then
+  repair the table partitions (the configured `dev` deployment uses
+  `github_webhooks_dev`):
    ```sql
-   MSCK REPAIR TABLE github_webhooks.events;
+  MSCK REPAIR TABLE github_webhooks_dev.events;
    ```
 3. Query your data lake directly using standard SQL operations:
    ```sql
-   SELECT type, action, repository.name, sender.login 
-   FROM github_webhooks.events
+  SELECT event_type, action, repository.name, sender.login
+  FROM github_webhooks_dev.events
    WHERE year = '2026' AND month = '08' 
    LIMIT 10;
    ```
