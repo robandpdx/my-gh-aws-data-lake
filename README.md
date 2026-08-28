@@ -80,6 +80,9 @@ Once the deployment status shows `CREATE_COMPLETE`:
 
 ### Troubleshooting: GitHub Shows Success but S3 Is Empty
 
+* A GitHub delivery status of **200** means API Gateway successfully submitted
+  the record to Firehose. Parquet conversion and S3 delivery occur
+  asynchronously after that response.
 * Allow up to **5 minutes** for low-volume traffic to appear. The Firehose stream
   flushes after 300 seconds or 64 MiB, whichever comes first.
 * Successful Parquet files are written below `webhooks/`. Records that reach
@@ -87,8 +90,9 @@ Once the deployment status shows `CREATE_COMPLETE`:
   details in the `FirehoseLogGroupName` CloudFormation output.
 * The endpoint accepts both GitHub content types: `application/json` and
   `application/x-www-form-urlencoded`. Other content types receive HTTP 415.
-* Firehose service errors are returned as non-2xx responses so GitHub marks the
-  delivery as failed instead of displaying a false success.
+* Synchronous Firehose API errors are returned as non-2xx responses. Later
+  format-conversion failures cannot change GitHub's original 200 response and
+  must be diagnosed under `webhooks-errors/`.
 * The `raw_payload`, `id`, and `event_type` fields are populated only for
   webhook records received after deploying the current API Gateway mapping.
 

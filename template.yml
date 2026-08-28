@@ -247,17 +247,17 @@ Resources:
             #set($deliveryId = $util.escapeJavaScript($input.params().header.get('X-GitHub-Delivery')).replaceAll("\\'","'"))
             #set($eventType = $util.escapeJavaScript($input.params().header.get('X-GitHub-Event')).replaceAll("\\'","'"))
             #set($action = '')
-            #if($root.action)
+            #if($root.containsKey('action'))
               #set($action = $util.escapeJavaScript($root.action).replaceAll("\\'","'"))
             #end
             #set($repositoryField = "")
-            #set($repository = $input.json('$.repository'))
-            #if($repository != '""')
+            #if($root.containsKey('repository'))
+              #set($repository = $input.json('$.repository'))
               #set($repositoryField = ",${!quote}repository${!quote}:${!repository}")
             #end
             #set($senderField = "")
-            #set($sender = $input.json('$.sender'))
-            #if($sender != '""')
+            #if($root.containsKey('sender'))
+              #set($sender = $input.json('$.sender'))
               #set($senderField = ",${!quote}sender${!quote}:${!sender}")
             #end
             #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
@@ -276,11 +276,11 @@ Resources:
             #set($deliveryId = $util.escapeJavaScript($input.params().header.get('X-GitHub-Delivery')).replaceAll("\\'","'"))
             #set($eventType = $util.escapeJavaScript($input.params().header.get('X-GitHub-Event')).replaceAll("\\'","'"))
             #set($action = '')
-            #if($parsedPayload.action)
+            #if($parsedPayload.containsKey('action'))
               #set($action = $util.escapeJavaScript($parsedPayload.action).replaceAll("\\'","'"))
             #end
             #set($repositoryField = "")
-            #if($parsedPayload.repository)
+            #if($parsedPayload.containsKey('repository'))
               #set($repository = $parsedPayload.repository)
               #set($repositoryName = $util.escapeJavaScript($repository.name).replaceAll("\\'","'"))
               #set($repositoryFullName = $util.escapeJavaScript($repository.full_name).replaceAll("\\'","'"))
@@ -289,7 +289,7 @@ Resources:
               #set($repositoryField = ",${!quote}repository${!quote}:${!repositoryJson}")
             #end
             #set($senderField = "")
-            #if($parsedPayload.sender)
+            #if($parsedPayload.containsKey('sender'))
               #set($sender = $parsedPayload.sender)
               #set($senderLogin = $util.escapeJavaScript($sender.login).replaceAll("\\'","'"))
               #set($senderType = $util.escapeJavaScript($sender.type).replaceAll("\\'","'"))
@@ -317,7 +317,7 @@ Resources:
 
   # API Gateway deployments are immutable snapshots. Bump this logical ID when
   # the method or integration changes so CloudFormation publishes a new snapshot.
-  WebhookDeploymentV11:
+  WebhookDeploymentV12:
     Type: AWS::ApiGateway::Deployment
     DependsOn: WebhookPostMethod
     Properties:
@@ -326,7 +326,7 @@ Resources:
   WebhookStage:
     Type: AWS::ApiGateway::Stage
     Properties:
-      DeploymentId: !Ref WebhookDeploymentV11
+      DeploymentId: !Ref WebhookDeploymentV12
       RestApiId: !Ref WebhookApi
       StageName: !Ref Environment
       Tags:
