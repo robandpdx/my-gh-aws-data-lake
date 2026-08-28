@@ -84,7 +84,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2010-09-09'
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -93,7 +93,7 @@ Resources:
       Policies:
         - PolicyName: FirehoseDeliveryPolicy
           PolicyDocument:
-            Version: '2010-09-09'
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
@@ -124,7 +124,6 @@ Resources:
   # 5. Amazon Data Firehose Delivery Stream
   FirehoseDeliveryStream:
     Type: AWS::KinesisFirehose::DeliveryStream
-    DependsOn: FirehoseRole
     Properties:
       DeliveryStreamName: !Sub "github-webhooks-parquet-stream-${Environment}"
       DeliveryStreamType: DirectPut
@@ -157,7 +156,7 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2010-09-09'
+        Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Principal:
@@ -166,7 +165,7 @@ Resources:
       Policies:
         - PolicyName: ApiGatewayFirehosePolicy
           PolicyDocument:
-            Version: '2010-09-09'
+            Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
