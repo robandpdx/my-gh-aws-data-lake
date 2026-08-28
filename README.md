@@ -92,7 +92,10 @@ Once the deployment status shows `CREATE_COMPLETE`:
 
 ### 4. Initialize Data Partition Catalog Refreshes
 Once the pipeline has captured its first set of live incoming events and deposited Parquet blocks into the S3 bucket, synchronize the AWS Glue table structural directory map:
-1. Open the **Amazon Athena Console**.
+1. Open the **Amazon Athena Console** and select the workgroup shown by the
+  `AthenaWorkGroupName` CloudFormation output. The workgroup automatically
+  stores encrypted query results at the `AthenaQueryResultsLocation` output,
+  so no manual query result location is required.
 2. Use the database shown by the `GlueDatabaseName` CloudFormation output, then
   repair the table partitions (the configured `dev` deployment uses
   `github_webhooks_dev`):

@@ -286,6 +286,26 @@ Resources:
         - Key: owner
           Value: !Ref owner
 
+  # 9. Athena workgroup with a managed S3 query result location
+  AthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub "github-webhooks-${Environment}"
+      Description: !Sub "Athena workgroup for GitHub webhook queries in ${Environment}"
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${WebhookS3Bucket}/athena-results/"
+          ExpectedBucketOwner: !Ref AWS::AccountId
+          EncryptionConfiguration:
+            EncryptionOption: SSE_S3
+      Tags:
+        - Key: owner
+          Value: !Ref owner
+
 Outputs:
   WebhookEndpoint:
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
@@ -299,3 +319,9 @@ Outputs:
   FirehoseLogGroupName:
     Value: !Ref FirehoseLogGroup
     Description: "The CloudWatch log group containing Firehose delivery errors"
+  AthenaWorkGroupName:
+    Value: !Ref AthenaWorkGroup
+    Description: "Select this workgroup in the Athena query editor before running queries"
+  AthenaQueryResultsLocation:
+    Value: !Sub "s3://${WebhookS3Bucket}/athena-results/"
+    Description: "The S3 location used for Athena query results"
