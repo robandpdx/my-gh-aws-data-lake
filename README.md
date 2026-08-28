@@ -115,3 +115,6 @@ FROM github_webhooks_dev.events
   WHERE year = '2026' AND month = '08' 
   LIMIT 10;
 ```
+
+### 5. Next Steps
+This is just the beginning! Please see [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md) for a complete analytics solution for your GitHub event data.
