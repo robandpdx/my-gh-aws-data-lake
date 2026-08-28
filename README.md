@@ -1,1 +1,73 @@
-# my-gh-aws-data-lake
+# 🚀 GitHub Webhooks to AWS S3 Parquet Pipeline
+
+This deployment guide outlines the infrastructure architecture and setup steps required to ingest global or organization-level GitHub webhooks, convert them to Apache Parquet format via Amazon Data Firehose, and query them seamlessly using Amazon Athena.
+
+---
+
+## 📦 Infrastructure Component Breakdown
+
+The pipeline leverages a completely serverless architecture to process high-throughput webhook streams efficiently without provisioning underlying servers:
+
+* **Amazon S3 Bucket**
+  * Serves as the centralized data lake repository for long-term audit logs.
+  * Configured with default **SSE-S3 (AES-256) server-side encryption** to maintain strict enterprise data security compliance.
+
+* **AWS Glue Catalog Database & Table**
+  * Establishes the target relational structure for your data lake.
+  * Outlines a foundational, strongly-typed schema for standard GitHub metadata properties (`id`, `event_type`, `action`, `repository`, `sender`).
+  * Integrates an explicit, open-ended string column (`raw_payload`) to handle shifting polymorphic GitHub event fields gracefully, preventing schema validation dropouts.
+
+* **Amazon Data Firehose Delivery Stream**
+  * Acts as the real-time buffer engine, minimizing data pipeline latency.
+  * Utilizes built-in inline record format serialization to convert raw incoming streaming JSON objects into high-performance, columnar **Apache Parquet** format.
+  * Employs time-based and size-based delivery window thresholds to cluster files logically.
+  * Organizes streaming writes natively using standard Hive partitioning patterns: `webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/`.
+
+* **Amazon API Gateway Framework**
+  * Exposes a public, high-availability HTTPS REST API endpoint required by GitHub webhooks.
+  * Configured with a **direct service integration proxy** that pushes incoming events directly into Firehose pipelines via Velocity Mapping Templates (VTL).
+  * Completely eliminates intermediate computing runtimes (like AWS Lambda functions) to minimize execution latency and eliminate invocation compute costs.
+
+---
+
+## 🚀 Deployment Instructions
+
+### 1. Execute the Infrastructure Deployment
+Deploy the infrastructure template via the AWS CloudFormation Console or execute the deployment directly using the AWS Command Line Interface (CLI):
+
+```bash
+aws cloudformation deploy \
+  --template-file generated/github_webhooks_infrastructure.yml \
+  --stack-name github-webhook-parquet-pipeline \
+  --parameter-overrides Environment=prod \
+  --capabilities CAPABILITY_IAM
+```
+
+### 2. Capture the Webhook Ingestion Endpoint
+Once the deployment status shows `CREATE_COMPLETE`:
+1. Navigate to the **Outputs** tab of your deployed CloudFormation stack.
+2. Locate and copy the value corresponding to the **`WebhookEndpoint`** key.
+
+### 3. Configure the GitHub Webhook Settings
+1. Open your **GitHub Enterprise Portal** or individual **Organization Profile Settings** page.
+2. Select **Settings** -> **Webhooks** from the left navigation tree, then click **Add webhook**.
+3. **Payload URL:** Paste the `WebhookEndpoint` URL retrieved from your CloudFormation Outputs step.
+4. **Content type:** Change the dropdown selection to `application/json`.
+5. **Secret:** Input a complex string password to cryptographically sign all inbound webhook payloads.
+6. **Trigger Events:** Choose either "Send me everything" or select specific targeted operational event flags (such as `push`, `pull_request`, or `workflow_job`).
+7. Click **Add webhook** to activate real-time stream ingestion.
+
+### 4. Initialize Data Partition Catalog Refreshes
+Once the pipeline has captured its first set of live incoming events and deposited Parquet blocks into the S3 bucket, synchronize the AWS Glue table structural directory map:
+1. Open the **Amazon Athena Console**.
+2. Run the partition repair execution statement against your environment database:
+   ```sql
+   MSCK REPAIR TABLE github_webhooks.events;
+   ```
+3. Query your data lake directly using standard SQL operations:
+   ```sql
+   SELECT type, action, repository.name, sender.login 
+   FROM github_webhooks.events
+   WHERE year = '2026' AND month = '08' 
+   LIMIT 10;
+   ```

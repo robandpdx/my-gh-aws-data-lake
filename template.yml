@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'AWS Infrastructure for ingesting GitHub Webhooks to S3 in Parquet format via API Gateway and Amazon Data Firehose.'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Environment stage for deployment.
+
+Resources:
+  # 1. Amazon S3 Bucket for Data Lake Storage
+  WebhookS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "github-webhooks-parquet-${Environment}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # 2. AWS Glue Database
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "github_webhooks_${Environment}"
+        Description: "Database for GitHub webhooks ingested as Parquet"
+
+  # 3. AWS Glue Table (Defines Parquet schema with core metadata and flexible payload)
+  GlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref GlueDatabase
+      TableInput:
+        Name: events
+        Description: "Table storing GitHub webhook events"
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          has_encrypted_data: 'false'
+        StorageDescriptor:
+          Location: !Sub "s3://${WebhookS3Bucket}/webhooks/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          Compressed: true
+          NumberOfBuckets: -1
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+            Parameters:
+              serialization.format: '1'
+          Columns:
+            - Name: id
+              Type: string
+              Comment: "GitHub Event ID"
+            - Name: event_type
+              Type: string
+              Comment: "GitHub Event Type header"
+            - Name: action
+              Type: string
+              Comment: "Specific action taken"
+            - Name: repository
+              Type: struct<id:bigint,name:string,full_name:string,html_url:string>
+              Comment: "Basic repository metadata struct"
+            - Name: sender
+              Type: struct<id:bigint,login:string,type:string>
+              Comment: "User who triggered the event"
+            - Name: raw_payload
+              Type: string
+              Comment: "Full JSON string payload to handle GitHub polymorphism safely"
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+
+  # 4. IAM Role for Firehose
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2010-09-09'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FirehoseDeliveryPolicy
+          PolicyDocument:
+            Version: '2010-09-09'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt WebhookS3Bucket.Arn
+                  - !Sub "${WebhookS3Bucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                Resource:
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/events"
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*"
+
+  # 5. Amazon Data Firehose Delivery Stream
+  FirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn: FirehoseRole
+    Properties:
+      DeliveryStreamName: !Sub "github-webhooks-parquet-stream-${Environment}"
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        RoleARN: !GetAtt FirehoseRole.Arn
+        BucketARN: !GetAtt WebhookS3Bucket.Arn
+        Prefix: "webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+        ErrorOutputPrefix: "webhooks-errors/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/!{firehose:error-output-type}/"
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 64
+        CompressionFormat: UNCOMPRESSED # Format conversion handles its own internal Parquet compression (Snappy)
+        DataFormatConversionConfiguration:
+          Enabled: true
+          InputFormatConfiguration:
+            Deserializer:
+              OpenXJsonSerDe: {}
+          OutputFormatConfiguration:
+            Serializer:
+              ParquetSerDe: {}
+          SchemaConfiguration:
+            DatabaseName: !Ref GlueDatabase
+            TableName: events
+            RoleARN: !GetAtt FirehoseRole.Arn
+            Region: !Ref AWS::Region
+            VersionId: LATEST
+
+  # 6. IAM Role for API Gateway to write directly to Firehose
+  ApiGatewayFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2010-09-09'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApiGatewayFirehosePolicy
+          PolicyDocument:
+            Version: '2010-09-09'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                Resource: !GetAtt FirehoseDeliveryStream.Arn
+
+  # 7. Amazon API Gateway (REST API)
+  WebhookApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "github-webhooks-ingest-${Environment}"
+      Description: "API Gateway backend endpoint to ingest GitHub Webhooks directly into Data Firehose"
+
+  WebhookResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt WebhookApi.RootResourceId
+      PathPart: events
+      RestApiId: !Ref WebhookApi
+
+  # POST Method integrating straight to Firehose via AWS Service Proxy
+  WebhookPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref WebhookResource
+      RestApiId: !Ref WebhookApi
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:firehose:action/PutRecord"
+        Credentials: !GetAtt ApiGatewayFirehoseRole.Arn
+        RequestTemplates:
+          application/json: !Sub |
+            {
+              "DeliveryStreamName": "${FirehoseDeliveryStream}",
+              "Record": {
+                "Data": "$util.base64Encode($util.escapeJavaScript($input.json('$'))\n)"
+              }
+            }
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseTemplates:
+              application/json: '{"status": "success"}'
+      MethodResponses:
+        - StatusCode: '200'
+
+  WebhookDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: WebhookPostMethod
+    Properties:
+      RestApiId: !Ref WebhookApi
+
+  WebhookStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      DeploymentId: !Ref WebhookDeployment
+      RestApiId: !Ref WebhookApi
+      StageName: !Ref Environment
+
+Outputs:
+  WebhookEndpoint:
+    Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
+    Description: "Provide this exact URL to your GitHub Webhook configuration payload URL field"
+  S3BucketName:
+    Value: !Ref WebhookS3Bucket
+    Description: "The name of your deployed Parquet data lake S3 bucket"
+  GlueDatabaseName:
+    Value: !Ref GlueDatabase
+    Description: "The name of your Glue database for Athena queries"
