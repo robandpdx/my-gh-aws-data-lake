@@ -8,6 +8,10 @@ Parameters:
     Default: prod
     AllowedValues: [dev, staging, prod]
     Description: Environment stage for deployment.
+  owner:
+    Type: String
+    Default: robandpdx
+    Description: Owner applied to all taggable resources.
 
 Resources:
   # 1. Amazon S3 Bucket for Data Lake Storage
@@ -19,6 +23,9 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      Tags:
+        - Key: owner
+          Value: !Ref owner
 
   # 2. AWS Glue Database
   GlueDatabase:
@@ -120,6 +127,9 @@ Resources:
                 Action:
                   - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/*"
+      Tags:
+        - Key: owner
+          Value: !Ref owner
 
   # 5. Amazon Data Firehose Delivery Stream
   FirehoseDeliveryStream:
@@ -127,6 +137,9 @@ Resources:
     Properties:
       DeliveryStreamName: !Sub "github-webhooks-parquet-stream-${Environment}"
       DeliveryStreamType: DirectPut
+      Tags:
+        - Key: owner
+          Value: !Ref owner
       ExtendedS3DestinationConfiguration:
         RoleARN: !GetAtt FirehoseRole.Arn
         BucketARN: !GetAtt WebhookS3Bucket.Arn
@@ -171,6 +184,9 @@ Resources:
                 Action:
                   - firehose:PutRecord
                 Resource: !GetAtt FirehoseDeliveryStream.Arn
+      Tags:
+        - Key: owner
+          Value: !Ref owner
 
   # 7. Amazon API Gateway (REST API)
   WebhookApi:
@@ -178,6 +194,9 @@ Resources:
     Properties:
       Name: !Sub "github-webhooks-ingest-${Environment}"
       Description: "API Gateway backend endpoint to ingest GitHub Webhooks directly into Data Firehose"
+      Tags:
+        - Key: owner
+          Value: !Ref owner
 
   WebhookResource:
     Type: AWS::ApiGateway::Resource
@@ -226,6 +245,9 @@ Resources:
       DeploymentId: !Ref WebhookDeployment
       RestApiId: !Ref WebhookApi
       StageName: !Ref Environment
+      Tags:
+        - Key: owner
+          Value: !Ref owner
 
 Outputs:
   WebhookEndpoint:
