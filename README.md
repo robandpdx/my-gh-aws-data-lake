@@ -96,13 +96,13 @@ Once the pipeline has captured its first set of live incoming events and deposit
 2. Use the database shown by the `GlueDatabaseName` CloudFormation output, then
   repair the table partitions (the configured `dev` deployment uses
   `github_webhooks_dev`):
-   ```sql
-  MSCK REPAIR TABLE github_webhooks_dev.events;
-   ```
+```sql
+MSCK REPAIR TABLE github_webhooks_dev.events;
+```
 3. Query your data lake directly using standard SQL operations:
-   ```sql
-  SELECT event_type, action, repository.name, sender.login
-  FROM github_webhooks_dev.events
-   WHERE year = '2026' AND month = '08' 
-   LIMIT 10;
-   ```
+```sql
+SELECT event_type, action, repository.name, sender.login
+FROM github_webhooks_dev.events
+  WHERE year = '2026' AND month = '08' 
+  LIMIT 10;
+```
