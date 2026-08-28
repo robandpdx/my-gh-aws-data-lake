@@ -241,19 +241,66 @@ Resources:
         PassthroughBehavior: NEVER
         RequestTemplates:
           application/json: !Sub |
+            #set($quote = '"')
+            #set($root = $input.path('$'))
+            #set($rawPayload = $util.escapeJavaScript($input.body).replaceAll("\\'","'"))
+            #set($deliveryId = $util.escapeJavaScript($input.params().header.get('X-GitHub-Delivery')).replaceAll("\\'","'"))
+            #set($eventType = $util.escapeJavaScript($input.params().header.get('X-GitHub-Event')).replaceAll("\\'","'"))
+            #set($action = '')
+            #if($root.action)
+              #set($action = $util.escapeJavaScript($root.action).replaceAll("\\'","'"))
+            #end
+            #set($repositoryField = "")
+            #set($repository = $input.json('$.repository'))
+            #if($repository != '""')
+              #set($repositoryField = ",${!quote}repository${!quote}:${!repository}")
+            #end
+            #set($senderField = "")
+            #set($sender = $input.json('$.sender'))
+            #if($sender != '""')
+              #set($senderField = ",${!quote}sender${!quote}:${!sender}")
+            #end
+            #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
             {
               "DeliveryStreamName": "${FirehoseDeliveryStream}",
               "Record": {
-                "Data": "$util.base64Encode($input.body)"
+                "Data": "$util.base64Encode($enrichedPayload)"
               }
             }
           application/x-www-form-urlencoded: !Sub |
+            #set($quote = '"')
             #set($encodedPayload = $input.body.substring(8))
             #set($payload = $util.urlDecode($encodedPayload))
+            #set($parsedPayload = $util.parseJson($payload))
+            #set($rawPayload = $util.escapeJavaScript($payload).replaceAll("\\'","'"))
+            #set($deliveryId = $util.escapeJavaScript($input.params().header.get('X-GitHub-Delivery')).replaceAll("\\'","'"))
+            #set($eventType = $util.escapeJavaScript($input.params().header.get('X-GitHub-Event')).replaceAll("\\'","'"))
+            #set($action = '')
+            #if($parsedPayload.action)
+              #set($action = $util.escapeJavaScript($parsedPayload.action).replaceAll("\\'","'"))
+            #end
+            #set($repositoryField = "")
+            #if($parsedPayload.repository)
+              #set($repository = $parsedPayload.repository)
+              #set($repositoryName = $util.escapeJavaScript($repository.name).replaceAll("\\'","'"))
+              #set($repositoryFullName = $util.escapeJavaScript($repository.full_name).replaceAll("\\'","'"))
+              #set($repositoryUrl = $util.escapeJavaScript($repository.html_url).replaceAll("\\'","'"))
+              #set($repositoryJson = "{${!quote}id${!quote}:$repository.id,${!quote}name${!quote}:${!quote}${!repositoryName}${!quote},${!quote}full_name${!quote}:${!quote}${!repositoryFullName}${!quote},${!quote}html_url${!quote}:${!quote}${!repositoryUrl}${!quote}}")
+              #set($repositoryField = ",${!quote}repository${!quote}:${!repositoryJson}")
+            #end
+            #set($senderField = "")
+            #if($parsedPayload.sender)
+              #set($sender = $parsedPayload.sender)
+              #set($senderLogin = $util.escapeJavaScript($sender.login).replaceAll("\\'","'"))
+              #set($senderType = $util.escapeJavaScript($sender.type).replaceAll("\\'","'"))
+              #set($senderJson = "{${!quote}id${!quote}:$sender.id,${!quote}login${!quote}:${!quote}${!senderLogin}${!quote},${!quote}type${!quote}:${!quote}${!senderType}${!quote}}")
+              #set($senderField = ",${!quote}sender${!quote}:${!senderJson}")
+            #end
+            #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
             {
               "DeliveryStreamName": "${FirehoseDeliveryStream}",
               "Record": {
-                "Data": "$util.base64Encode($payload)"
+                "Data": "$util.base64Encode($enrichedPayload)"
               }
             }
         IntegrationResponses:
@@ -270,7 +317,7 @@ Resources:
 
   # API Gateway deployments are immutable snapshots. Bump this logical ID when
   # the method or integration changes so CloudFormation publishes a new snapshot.
-  WebhookDeploymentV3:
+  WebhookDeploymentV11:
     Type: AWS::ApiGateway::Deployment
     DependsOn: WebhookPostMethod
     Properties:
@@ -279,7 +326,7 @@ Resources:
   WebhookStage:
     Type: AWS::ApiGateway::Stage
     Properties:
-      DeploymentId: !Ref WebhookDeploymentV3
+      DeploymentId: !Ref WebhookDeploymentV11
       RestApiId: !Ref WebhookApi
       StageName: !Ref Environment
       Tags:

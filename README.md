@@ -45,7 +45,7 @@ The pipeline leverages a completely serverless architecture to process high-thro
 
 * **Amazon API Gateway Framework**
   * Exposes a public, high-availability HTTPS REST API endpoint required by GitHub webhooks.
-  * Configured with a **direct service integration proxy** that pushes incoming events directly into Firehose pipelines via Velocity Mapping Templates (VTL).
+  * Configured with a **direct service integration proxy** that uses Velocity Mapping Templates (VTL) to preserve the complete GitHub body in `raw_payload`, capture the delivery ID and event-type headers, and push the enriched record directly into Firehose.
   * Completely eliminates intermediate computing runtimes (like AWS Lambda functions) to minimize execution latency and eliminate invocation compute costs.
 
 ---
@@ -89,6 +89,8 @@ Once the deployment status shows `CREATE_COMPLETE`:
   `application/x-www-form-urlencoded`. Other content types receive HTTP 415.
 * Firehose service errors are returned as non-2xx responses so GitHub marks the
   delivery as failed instead of displaying a false success.
+* The `raw_payload`, `id`, and `event_type` fields are populated only for
+  webhook records received after deploying the current API Gateway mapping.
 
 ### 4. Initialize Data Partition Catalog Refreshes
 Once the pipeline has captured its first set of live incoming events and deposited Parquet blocks into the S3 bucket, synchronize the AWS Glue table structural directory map:
