@@ -95,7 +95,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: firehose.amazonaws.amazonaws.com
+              Service: firehose.amazonaws.com
             Action: sts:AssumeRole
       Policies:
         - PolicyName: FirehoseDeliveryPolicy

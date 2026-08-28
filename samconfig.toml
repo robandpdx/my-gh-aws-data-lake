@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "robandpdx-gh-webhook-parquet-pipeline"
+resolve_s3 = true
+s3_prefix = "robandpdx-gh-webhook-parquet-pipeline"
+region = "us-west-2"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=\"dev\" owner=\"robandpdx\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-west-2"
