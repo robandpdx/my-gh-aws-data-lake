@@ -746,6 +746,27 @@ Resources:
               Type: int
             - Name: normalized_at
               Type: timestamp
+            - Name: record_family
+              Type: string
+              Comment: Audit or Copilot usage record family.
+            - Name: copilot_record_type
+              Type: string
+              Comment: Copilot usage record direction; request or response.
+            - Name: event_id
+              Type: string
+              Comment: Source event identifier used to deduplicate Copilot usage records.
+            - Name: github_request_id
+              Type: string
+              Comment: Correlation key joining Copilot request and response records.
+            - Name: enterprise_id
+              Type: bigint
+              Comment: Enterprise identifier from a Copilot usage record.
+            - Name: endpoint
+              Type: string
+              Comment: Copilot API endpoint without request or response content.
+            - Name: truncated
+              Type: boolean
+              Comment: Whether GitHub truncated the Copilot usage record body.
         PartitionKeys:
           - Name: year
             Type: string
@@ -1069,7 +1090,7 @@ Resources:
           QUARANTINE_BUCKET: !Ref WebhookS3Bucket
           QUARANTINE_PREFIX: quarantine/audit-logs
           ENVIRONMENT: !Ref Environment
-          SCHEMA_VERSION: '1'
+          SCHEMA_VERSION: '2'
           MAX_COMPRESSED_BYTES: '20971520'
           MAX_UNCOMPRESSED_BYTES: '104857600'
       Events:

@@ -77,6 +77,31 @@ def _read_gzip_bounded(body):
     return b"".join(chunks)
 
 
+def _parse_json_records(raw_json):
+    text = raw_json.decode("utf-8-sig")
+    decoder = json.JSONDecoder()
+    records = []
+    offset = 0
+    parsed_value = False
+
+    while offset < len(text):
+        while offset < len(text) and text[offset].isspace():
+            offset += 1
+        if offset == len(text):
+            break
+
+        value, offset = decoder.raw_decode(text, offset)
+        parsed_value = True
+        if isinstance(value, list):
+            records.extend(value)
+        else:
+            records.append(value)
+
+    if not parsed_value:
+        raise json.JSONDecodeError("No JSON values found", text, 0)
+    return records
+
+
 def _parse_timestamp(value):
     if value is None or isinstance(value, bool):
         raise RecordValidationError("missing_event_timestamp")
@@ -148,16 +173,33 @@ def _repository_name(event):
     return _optional_string(repository) or _optional_string(event.get("repo"))
 
 
+def _copilot_record_type(event):
+    record_type = _optional_string(event.get("type"))
+    if (
+        record_type in {"request", "response"}
+        and _optional_string(event.get("event_id"))
+        and _optional_string(event.get("endpoint"))
+        and "body" in event
+    ):
+        return record_type
+    return None
+
+
 def _normalize_record(event, source, record_index, normalized_at):
     if not isinstance(event, dict):
         raise RecordValidationError("record_is_not_an_object")
 
     raw_payload = json.dumps(event, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     payload_sha256 = hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()
-    document_id = _optional_string(event.get("_document_id")) or payload_sha256
+    event_id = _optional_string(event.get("event_id"))
+    document_id = _optional_string(event.get("_document_id")) or event_id or payload_sha256
     event_timestamp = _parse_timestamp(event.get("@timestamp", event.get("created_at")))
     action = _optional_string(event.get("action"))
     action_parts = action.split(".", 1) if action else []
+    copilot_record_type = _copilot_record_type(event)
+    truncated = _optional_bool(event.get("truncated"))
+    if copilot_record_type and truncated is None:
+        truncated = False
 
     return {
         "document_id": document_id,
@@ -195,6 +237,13 @@ def _normalize_record(event, source, record_index, normalized_at):
         "source_record_index": record_index,
         "schema_version": SCHEMA_VERSION,
         "normalized_at": _format_timestamp(normalized_at),
+        "record_family": "copilot_usage" if copilot_record_type else "audit",
+        "copilot_record_type": copilot_record_type,
+        "event_id": event_id,
+        "github_request_id": _optional_string(event.get("github_request_id")),
+        "enterprise_id": _optional_int(event.get("enterprise_id")),
+        "endpoint": _optional_string(event.get("endpoint")),
+        "truncated": truncated if copilot_record_type else None,
     }
 
 
@@ -296,7 +345,7 @@ def _process_sqs_record(sqs_record):
     body = response["Body"]
     try:
         raw_json = _read_gzip_bounded(body)
-        parsed = json.loads(raw_json)
+        source_records = _parse_json_records(raw_json)
     except (
         gzip.BadGzipFile,
         EOFError,
@@ -311,7 +360,6 @@ def _process_sqs_record(sqs_record):
     finally:
         body.close()
 
-    source_records = parsed if isinstance(parsed, list) else [parsed]
     normalized_at = datetime.now(timezone.utc)
     firehose_records = []
     quarantined = 0

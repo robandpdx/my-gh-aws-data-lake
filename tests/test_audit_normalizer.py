@@ -83,7 +83,67 @@ class AuditNormalizerTests(unittest.TestCase):
         self.assertEqual(normalized["repository_id"], 99)
         self.assertEqual(normalized["source_ip"], "192.0.2.10")
         self.assertEqual(normalized["source_object_version"], "version-1")
+        self.assertEqual(normalized["record_family"], "audit")
+        self.assertIsNone(normalized["copilot_record_type"])
         self.assertRegex(normalized["event_timestamp"], r"^2026-09-03T")
+
+    def test_uses_payload_hash_when_source_ids_are_absent(self):
+        source_event = {"@timestamp": 1788400000123, "action": "repo.create"}
+        app._clients["s3"] = FakeS3(gzip.compress(json.dumps(source_event).encode("utf-8")))
+        firehose = FakeFirehose()
+        app._clients["firehose"] = firehose
+
+        result = app.lambda_handler(sqs_event(), None)
+
+        self.assertEqual(result, {"batchItemFailures": []})
+        normalized = json.loads(firehose.calls[0]["Records"][0]["Data"])
+        self.assertEqual(normalized["document_id"], normalized["payload_sha256"])
+
+    def test_normalizes_copilot_usage_record_envelopes(self):
+        source_events = [
+            {
+                "@timestamp": 1788400000123,
+                "event_id": "copilot-request-1",
+                "github_request_id": "github-request-1",
+                "type": "request",
+                "user_id": 42,
+                "enterprise_id": 7,
+                "endpoint": "/v1/messages",
+                "body": json.dumps({"model": "test-model", "messages": []}),
+                "headers": {"Authorization": "[REDACTED]"},
+                "truncated": True,
+            },
+            {
+                "@timestamp": 1788400000124,
+                "event_id": "copilot-response-1",
+                "github_request_id": "github-request-1",
+                "type": "response",
+                "user_id": 42,
+                "enterprise_id": 7,
+                "endpoint": "/v1/messages",
+                "body": "event: message_stop\ndata: {}\n",
+            },
+        ]
+        app._clients["s3"] = FakeS3(gzip.compress(json.dumps(source_events).encode("utf-8")))
+        firehose = FakeFirehose()
+        app._clients["firehose"] = firehose
+
+        result = app.lambda_handler(sqs_event(), None)
+
+        self.assertEqual(result, {"batchItemFailures": []})
+        request = json.loads(firehose.calls[0]["Records"][0]["Data"])
+        response = json.loads(firehose.calls[0]["Records"][1]["Data"])
+        self.assertEqual(request["document_id"], "copilot-request-1")
+        self.assertEqual(request["record_family"], "copilot_usage")
+        self.assertEqual(request["copilot_record_type"], "request")
+        self.assertEqual(request["event_id"], "copilot-request-1")
+        self.assertEqual(request["github_request_id"], "github-request-1")
+        self.assertEqual(request["enterprise_id"], 7)
+        self.assertEqual(request["endpoint"], "/v1/messages")
+        self.assertTrue(request["truncated"])
+        self.assertEqual(response["document_id"], "copilot-response-1")
+        self.assertEqual(response["copilot_record_type"], "response")
+        self.assertFalse(response["truncated"])
 
     def test_quarantines_malformed_json_without_retrying_the_message(self):
         s3 = FakeS3(gzip.compress(b"not-json"))
@@ -108,6 +168,22 @@ class AuditNormalizerTests(unittest.TestCase):
         self.assertEqual(result, {"batchItemFailures": []})
         quarantine = json.loads(s3.quarantine_objects[0]["Body"])
         self.assertEqual(quarantine["reason"], "invalid_gzip_or_json")
+
+    def test_normalizes_consecutive_json_values(self):
+        source_events = [
+            {"@timestamp": 1788400000123, "_document_id": "one", "action": "repo.create"},
+            {"@timestamp": 1788400000124, "_document_id": "two", "action": "repo.destroy"},
+        ]
+        encoded = "".join(json.dumps(source_event) for source_event in source_events)
+        app._clients["s3"] = FakeS3(gzip.compress(encoded.encode("utf-8")))
+        firehose = FakeFirehose()
+        app._clients["firehose"] = firehose
+
+        result = app.lambda_handler(sqs_event(), None)
+
+        self.assertEqual(result, {"batchItemFailures": []})
+        normalized = [json.loads(record["Data"]) for record in firehose.calls[0]["Records"]]
+        self.assertEqual([record["document_id"] for record in normalized], ["one", "two"])
 
     def test_quarantines_an_invalid_record_and_processes_valid_siblings(self):
         source_events = [

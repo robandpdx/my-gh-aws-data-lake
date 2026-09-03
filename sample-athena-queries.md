@@ -65,6 +65,206 @@ normalizer. Its `year`, `month`, `day`, and `hour` partitions represent UTC
 normalization time, not `event_timestamp`. Always prune these partitions even
 when applying an event-time predicate.
 
+### Create the Copilot usage metadata view
+
+Copilot usage records share the audit stream but are not ordinary audit
+actions. Requests contain a JSON-encoded `body`; responses can contain a
+server-sent event stream. The restricted view below extracts only operational
+metadata and source-reported token counters. It never exposes request or
+response content, headers, prompts, tool arguments, or generated text.
+
+The token fields are preview data whose semantics can vary by endpoint and
+model. The view takes the last value reported in an SSE response rather than
+summing cumulative counters.
+
+```sql
+CREATE OR REPLACE VIEW
+  github_audit_logs_bronze_dev.copilot_usage_records_metadata AS
+WITH copilot_records AS (
+  SELECT
+    document_id,
+    event_id,
+    github_request_id,
+    event_timestamp,
+    copilot_record_type,
+    user_id,
+    enterprise_id,
+    endpoint,
+    truncated,
+    payload_sha256,
+    source_object_key,
+    source_record_index,
+    schema_version,
+    normalized_at,
+    year,
+    month,
+    day,
+    hour,
+    json_extract_scalar(raw_payload, '$.body') AS body
+  FROM github_audit_logs_bronze_dev.bronze_events
+  WHERE record_family = 'copilot_usage'
+)
+SELECT
+  document_id,
+  event_id,
+  github_request_id,
+  event_timestamp,
+  copilot_record_type,
+  user_id,
+  enterprise_id,
+  endpoint,
+  truncated,
+  CASE
+    WHEN copilot_record_type = 'request'
+      THEN try(json_extract_scalar(body, '$.model'))
+    WHEN copilot_record_type = 'response'
+      THEN nullif(regexp_extract(body, '"model"\s*:\s*"([^"]+)"', 1), '')
+  END AS model,
+  CASE WHEN copilot_record_type = 'request' THEN
+    try_cast(json_extract_scalar(body, '$.max_tokens') AS bigint)
+  END AS requested_max_tokens,
+  CASE WHEN copilot_record_type = 'request' THEN
+    try(json_array_length(json_extract(body, '$.messages')))
+  END AS request_message_count,
+  CASE WHEN copilot_record_type = 'request' THEN
+    try(json_array_length(json_extract(body, '$.tools')))
+  END AS request_tool_count,
+  CASE WHEN copilot_record_type = 'response' THEN
+    try_cast(element_at(
+      regexp_extract_all(body, '"input_tokens"\s*:\s*(\d+)', 1), -1
+    ) AS bigint)
+  END AS input_tokens,
+  CASE WHEN copilot_record_type = 'response' THEN
+    try_cast(element_at(
+      regexp_extract_all(body, '"output_tokens"\s*:\s*(\d+)', 1), -1
+    ) AS bigint)
+  END AS output_tokens,
+  CASE WHEN copilot_record_type = 'response' THEN
+    try_cast(element_at(
+      regexp_extract_all(
+        body,
+        '"cache_creation_input_tokens"\s*:\s*(\d+)',
+        1
+      ),
+      -1
+    ) AS bigint)
+  END AS cache_creation_input_tokens,
+  CASE WHEN copilot_record_type = 'response' THEN
+    try_cast(element_at(
+      regexp_extract_all(body, '"cache_read_input_tokens"\s*:\s*(\d+)', 1),
+      -1
+    ) AS bigint)
+  END AS cache_read_input_tokens,
+  CASE WHEN copilot_record_type = 'response' THEN
+    try_cast(element_at(
+      regexp_extract_all(body, '"thinking_tokens"\s*:\s*(\d+)', 1), -1
+    ) AS bigint)
+  END AS thinking_tokens,
+  copilot_record_type = 'response'
+    AND NOT truncated
+    AND regexp_like(body, '(?m)^event: message_stop\r?$') AS usage_complete,
+  1 AS body_parser_version,
+  payload_sha256,
+  source_object_key,
+  source_record_index,
+  schema_version,
+  normalized_at,
+  year,
+  month,
+  day,
+  hour
+FROM copilot_records;
+```
+
+Treat this view as a convenience projection, not an access-control boundary.
+Use Lake Formation and S3/IAM policy to prevent its consumers from reading the
+underlying `raw_payload` column or bronze objects directly.
+
+### Inspect Copilot request and response metadata
+
+`event_id` identifies one streamed record. `github_request_id` correlates the
+request and response and must not be used as the deduplication key.
+
+```sql
+SELECT
+  event_timestamp,
+  event_id,
+  github_request_id,
+  copilot_record_type,
+  endpoint,
+  model,
+  request_message_count,
+  request_tool_count,
+  input_tokens,
+  output_tokens,
+  cache_creation_input_tokens,
+  cache_read_input_tokens,
+  thinking_tokens,
+  truncated,
+  usage_complete
+FROM github_audit_logs_bronze_dev.copilot_usage_records_metadata
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+ORDER BY github_request_id, event_timestamp;
+```
+
+### Summarize complete Copilot responses
+
+Exclude truncated or incomplete responses from token totals. Deduplicate only
+after applying physical partition filters so Athena can prune S3. Use the
+future Iceberg silver table when canonical deduplication must span all ingest
+partitions.
+
+```sql
+WITH selected_responses AS (
+  SELECT *
+  FROM github_audit_logs_bronze_dev.copilot_usage_records_metadata
+  WHERE year = '2026'
+    AND month = '09'
+    AND day = '03'
+    AND hour BETWEEN '00' AND '23'
+    AND copilot_record_type = 'response'
+),
+event_stats AS (
+  SELECT
+    event_id,
+    count(*) AS delivery_count,
+    count(DISTINCT payload_sha256) AS payload_versions
+  FROM selected_responses
+  GROUP BY event_id
+),
+ranked_responses AS (
+  SELECT
+    response.*,
+    row_number() OVER (
+      PARTITION BY event_id
+      ORDER BY normalized_at DESC, source_object_key DESC, source_record_index DESC
+    ) AS occurrence
+  FROM selected_responses AS response
+)
+SELECT
+  date_trunc('hour', response.event_timestamp) AS event_hour,
+  response.endpoint,
+  response.model,
+  count(*) AS response_count,
+  count(DISTINCT response.user_id) AS distinct_users,
+  sum(response.input_tokens) AS input_tokens,
+  sum(response.output_tokens) AS output_tokens,
+  sum(response.cache_creation_input_tokens) AS cache_creation_input_tokens,
+  sum(response.cache_read_input_tokens) AS cache_read_input_tokens,
+  sum(response.thinking_tokens) AS thinking_tokens,
+  sum(statistics.delivery_count - 1) AS duplicate_deliveries,
+  count_if(statistics.payload_versions > 1) AS integrity_conflicts
+FROM ranked_responses AS response
+JOIN event_stats AS statistics USING (event_id)
+WHERE response.occurrence = 1
+  AND response.usage_complete
+GROUP BY 1, 2, 3
+ORDER BY event_hour DESC, response_count DESC;
+```
+
 ### Inspect normalized events
 
 ```sql

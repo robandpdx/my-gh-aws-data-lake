@@ -257,7 +257,8 @@ The normalizer should:
 
 1. Read each referenced S3 object by version ID when present.
 2. Stream-decompress gzip rather than loading an unbounded object into memory.
-3. Parse only the verified source envelope.
+3. Parse the verified source envelope, including top-level arrays and
+  consecutive JSON values in one gzip object.
 4. Require or derive a stable event key.
 5. Rename fields that are awkward in Glue, such as `@timestamp` to
    `event_timestamp` and `_document_id` to `document_id`.
@@ -315,6 +316,20 @@ the webhook schema. A useful initial Parquet schema is:
 | `source_record_index` | integer | Position inside the gzip object |
 | `schema_version` | integer | Normalizer contract version |
 | `normalized_at` | timestamp | Processing timestamp |
+
+Copilot usage records use a separate public-preview envelope in the same
+stream. Add `record_family`, `copilot_record_type`, `event_id`,
+`github_request_id`, `enterprise_id`, `endpoint`, and `truncated` as nullable
+query-bronze columns. Prefer `event_id` over a payload hash when `_document_id`
+is absent. Deduplicate these records by `event_id` and pair request/response
+records by `github_request_id`.
+
+Keep Copilot `body` and `headers` inside restricted `raw_payload`. Request
+bodies are JSON-encoded strings, while response bodies can be server-sent
+event streams. A metadata view can expose allowlisted model, message/tool
+counts, and terminal token counters for initial exploration. Materialize those
+fields into a dedicated Iceberg silver table only after their preview contract
+and analytical use are stable.
 
 Partition query-bronze data by normalization date/hour. Store event time as a
 column and use it for downstream business metrics. Late and resumed deliveries

@@ -59,8 +59,13 @@ The pipeline leverages a completely serverless architecture to process high-thro
   * Processes up to five source objects per Lambda invocation with partial batch
     failure reporting, bounded gzip decompression, structured logs, X-Ray, and
     Embedded Metric Format counters.
+  * Accepts both top-level JSON arrays and consecutive JSON values within a
+    gzip object, as observed in the live audit stream.
   * Normalizes common identities and timestamps while preserving the complete
     source event in the restricted `raw_payload` column.
+  * Identifies Copilot usage request/response records, uses `event_id` as their
+    stable identity, and exposes only stable envelope metadata as typed bronze
+    columns. Request and response content remains restricted to `raw_payload`.
   * Converts normalized JSON to Snappy-compressed Parquet under
     `audit-logs/year=YYYY/month=MM/day=DD/hour=HH/`.
 
@@ -184,7 +189,9 @@ Query `github_audit_logs_bronze_dev.bronze_events` using the workgroup from the
 `AthenaWorkGroupName` output. Always constrain `year`, `month`, `day`, and
 preferably `hour`; see [sample-athena-queries.md](./sample-athena-queries.md).
 Treat `source_ip` and `raw_payload` as sensitive fields and do not expose them
-to general dashboard users.
+to general dashboard users. The sample queries define a metadata-only
+`copilot_usage_records_metadata` view for Copilot usage analysis without
+exposing headers, prompts, tool arguments, or generated content.
 
 Use the replay job to backfill retained objects that arrived before deployment.
 The prefix follows the raw bucket's UTC `YYYY/MM/DD/HH/mm/` layout:
