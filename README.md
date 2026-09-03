@@ -231,7 +231,7 @@ sam build
 
 At low audit volume, usage-based S3, SQS, Lambda, EventBridge, and Firehose
 charges should remain modest. The customer-managed KMS key for encrypted alarm
-notifications is the main fixed monthly resource charge; CloudWatch custom
+notifications is the main fixed monthly resource charge ($1.00 per month, prorated hourly); CloudWatch custom
 metrics, logs, alarms, and many small Parquet files can become material as
 volume grows. Review current `us-west-2` pricing and compact curated layers
 before broad dashboard use.
