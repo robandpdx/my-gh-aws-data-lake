@@ -56,13 +56,28 @@ The pipeline leverages a completely serverless architecture to process high-thro
 From the repository root, validate and build the template, then deploy it using the AWS SAM CLI. The guided deployment saves your selections for future `sam deploy` commands:
 
 ```bash
+export GITHUB_ENTERPRISE_SLUG="your-case-sensitive-enterprise-slug"
+# Keep false when the account already has this account-global OIDC provider.
+export CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER="false"
+
 sam validate --lint
 sam build
 sam deploy --guided \
   --stack-name robandpdx-gh-webhook-parquet-pipeline \
-  --parameter-overrides Environment=dev \
+  --parameter-overrides \
+    Environment=dev \
+    owner=robandpdx \
+    GitHubEnterpriseSlug="$GITHUB_ENTERPRISE_SLUG" \
+    CreateGitHubAuditLogOidcProvider="$CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER" \
   --capabilities CAPABILITY_IAM
 ```
+
+The stack also creates a private raw S3 landing bucket and an
+enterprise-scoped OIDC writer role for GitHub audit-log streaming. It reuses
+the account-global GitHub audit-log OIDC provider by default. Set
+`CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER=true` only if the provider does not
+already exist. The guided deployment stores the parameter values for later
+deployments.
 
 ### 2. Capture the Webhook Ingestion Endpoint
 Once the deployment status shows `CREATE_COMPLETE`:
@@ -116,5 +131,19 @@ FROM github_webhooks_dev.events
   LIMIT 10;
 ```
 
-### 5. Next Steps
-This is just the beginning! Please see [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md) for a complete analytics solution for your GitHub event data.
+### 5. Stream Enterprise Audit Logs
+
+Use the `AuditLogS3BucketName`, `AuditLogS3Region`, and
+`AuditLogWriterRoleArn` stack outputs to configure an Amazon S3 audit-log stream
+with OpenID Connect in the GitHub enterprise settings. The raw bucket is
+versioned and retained if the stack is deleted. GitHub receives only
+`s3:PutObject` permission for that bucket.
+
+See [github_audit_log_analytics_plan.md](./github_audit_log_analytics_plan.md)
+for setup, verification, normalization, Iceberg joins, Grafana serving,
+security, observability, cost, and phased implementation details.
+
+### 6. Next Steps
+
+See [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md)
+for the broader webhook analytics architecture.

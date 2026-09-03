@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: 'AWS Infrastructure for ingesting GitHub Webhooks to S3 in Parquet format via API Gateway and Amazon Data Firehose.'
+Description: 'AWS infrastructure for ingesting GitHub webhooks and enterprise audit logs into an S3 data lake.'
 
 Parameters:
   Environment:
@@ -12,6 +12,22 @@ Parameters:
     Type: String
     Default: robandpdx
     Description: Owner applied to all taggable resources.
+  GitHubEnterpriseSlug:
+    Type: String
+    AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$'
+    ConstraintDescription: Enter the case-sensitive GitHub enterprise slug.
+    Description: Case-sensitive enterprise slug used to restrict GitHub audit-log OIDC access.
+  CreateGitHubAuditLogOidcProvider:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Set to true only when this AWS account does not already have the GitHub audit-log OIDC provider.
+
+Conditions:
+  ShouldCreateGitHubAuditLogOidcProvider:
+    Fn::Equals:
+      - Ref: CreateGitHubAuditLogOidcProvider
+      - 'true'
 
 Resources:
   # 1. Amazon S3 Bucket for Data Lake Storage
@@ -353,6 +369,226 @@ Resources:
         - Key: owner
           Value: !Ref owner
 
+  # 10. Immutable raw landing zone for GitHub Enterprise Cloud audit-log streaming
+  AuditLogS3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "github-audit-logs-raw-${Environment}-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AuditLogS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt AuditLogS3Bucket.Arn
+              - !Sub "${AuditLogS3Bucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # GitHub uses a dedicated OIDC issuer for enterprise audit-log streaming.
+  GitHubAuditLogOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateGitHubAuditLogOidcProvider
+    Properties:
+      Url: https://oidc-configuration.audit-log.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  GitHubAuditLogWriterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows one GitHub enterprise audit-log stream to write raw objects to S3.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                Fn::If:
+                  - ShouldCreateGitHubAuditLogOidcProvider
+                  - Ref: GitHubAuditLogOidcProvider
+                  - Fn::Sub: "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/oidc-configuration.audit-log.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                oidc-configuration.audit-log.githubusercontent.com:aud: sts.amazonaws.com
+                oidc-configuration.audit-log.githubusercontent.com:sub: !Sub "https://github.com/${GitHubEnterpriseSlug}"
+      Policies:
+        - PolicyName: GitHubAuditLogS3WritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${AuditLogS3Bucket.Arn}/*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "github_audit_logs_bronze_${Environment}"
+        Description: Raw and normalized GitHub enterprise audit-log catalog.
+
+  AuditLogRawTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AuditLogGlueDatabase
+      TableInput:
+        Name: raw_events
+        Description: GitHub enterprise audit-log gzip JSON objects queried directly from S3.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2020,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          projection.hour.type: integer
+          projection.hour.range: '0,23'
+          projection.hour.digits: '2'
+          projection.minute.type: integer
+          projection.minute.range: '0,59'
+          projection.minute.digits: '2'
+          storage.location.template: !Sub "s3://${AuditLogS3Bucket}/${!year}/${!month}/${!day}/${!hour}/${!minute}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${AuditLogS3Bucket}/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'false'
+              ignore.malformed.json: 'true'
+              mapping.event_timestamp: '@timestamp'
+              mapping.document_id: '_document_id'
+          Columns:
+            - Name: event_timestamp
+              Type: bigint
+              Comment: Event occurrence time as Unix epoch milliseconds.
+            - Name: document_id
+              Type: string
+              Comment: GitHub audit event identifier used for deduplication.
+            - Name: action
+              Type: string
+            - Name: actor
+              Type: string
+            - Name: actor_id
+              Type: bigint
+            - Name: actor_ip
+              Type: string
+            - Name: actor_is_bot
+              Type: boolean
+            - Name: business
+              Type: string
+            - Name: business_id
+              Type: bigint
+            - Name: created_at
+              Type: bigint
+            - Name: operation_type
+              Type: string
+            - Name: org
+              Type: string
+            - Name: org_id
+              Type: bigint
+            - Name: repo
+              Type: string
+            - Name: repo_id
+              Type: bigint
+            - Name: repository
+              Type: string
+            - Name: repository_id
+              Type: bigint
+            - Name: user
+              Type: string
+            - Name: user_id
+              Type: bigint
+            - Name: request_id
+              Type: string
+            - Name: user_agent
+              Type: string
+            - Name: programmatic_access_type
+              Type: string
+            - Name: request_method
+              Type: string
+            - Name: route
+              Type: string
+            - Name: status_code
+              Type: int
+            - Name: url_path
+              Type: string
+            - Name: pull_request_id
+              Type: bigint
+            - Name: workflow_run_id
+              Type: bigint
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+          - Name: minute
+            Type: string
+
 Outputs:
   WebhookEndpoint:
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
@@ -372,3 +608,18 @@ Outputs:
   AthenaQueryResultsLocation:
     Value: !Sub "s3://${WebhookS3Bucket}/athena-results/"
     Description: "The S3 location used for Athena query results"
+  AuditLogS3BucketName:
+    Value: !Ref AuditLogS3Bucket
+    Description: "Configure this bucket as the GitHub enterprise audit-log S3 destination"
+  AuditLogS3Region:
+    Value: !Ref AWS::Region
+    Description: "Select this region when configuring the GitHub audit-log stream"
+  AuditLogWriterRoleArn:
+    Value: !GetAtt GitHubAuditLogWriterRole.Arn
+    Description: "Enter this value in GitHub's ARN Role field for audit-log streaming with OIDC"
+  AuditLogGlueDatabaseName:
+    Value: !Ref AuditLogGlueDatabase
+    Description: "Glue database reserved for raw and normalized GitHub audit logs"
+  AuditLogRawTableName:
+    Value: !Ref AuditLogRawTable
+    Description: "Athena table for querying raw GitHub audit-log gzip JSON objects"
