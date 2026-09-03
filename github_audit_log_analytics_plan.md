@@ -8,7 +8,7 @@ Stream GitHub Enterprise Cloud audit logs directly to a dedicated Amazon S3
 bronze bucket using GitHub's audit-log OpenID Connect (OIDC) provider. Keep the
 GitHub-delivered `.json.gz` objects immutable and independently replayable.
 
-Then add an asynchronous normalization path:
+The implemented asynchronous bronze path:
 
 1. Amazon S3 sends object-created events through Amazon EventBridge to Amazon
    SQS.
@@ -17,6 +17,8 @@ Then add an asynchronous normalization path:
    Firehose delivery stream.
 3. Firehose converts the normalized records to partitioned Parquet in the
    existing data-lake bucket.
+Future phases add the curated path:
+
 4. A scheduled AWS Glue job merges audit records and webhook-derived entities
    into Apache Iceberg v2 silver tables.
 5. The job refreshes compact gold aggregates designed for Grafana panels.
@@ -793,6 +795,8 @@ Exit criteria:
 - an unauthorized enterprise subject cannot assume the role.
 
 ### Phase 1: normalized Parquet bronze
+
+Implemented in the current SAM stack:
 
 - Add EventBridge rule, SQS queue/DLQ, queue policies, and alarms.
 - Implement and test the gzip/JSON Lambda normalizer.

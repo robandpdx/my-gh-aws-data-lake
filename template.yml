@@ -22,26 +22,73 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Set to true only when this AWS account does not already have the GitHub audit-log OIDC provider.
+  AuditLogAlarmEmail:
+    Type: String
+    Default: ''
+    Description: Optional email address to subscribe to audit-log pipeline alarms.
+  AuditLogNormalizerReservedConcurrency:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 100
+    Description: Reserved and maximum SQS concurrency for the audit-log normalizer.
 
 Conditions:
   ShouldCreateGitHubAuditLogOidcProvider:
     Fn::Equals:
       - Ref: CreateGitHubAuditLogOidcProvider
       - 'true'
+  HasAuditLogAlarmEmail:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: AuditLogAlarmEmail
+          - ''
 
 Resources:
   # 1. Amazon S3 Bucket for Data Lake Storage
   WebhookS3Bucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       BucketName: !Sub "github-webhooks-parquet-${Environment}-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       Tags:
-        - Key: owner
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
           Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  WebhookS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebhookS3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt WebhookS3Bucket.Arn
+              - !Sub "${WebhookS3Bucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
 
   # 2. AWS Glue Database
   GlueDatabase:
@@ -589,6 +636,846 @@ Resources:
           - Name: minute
             Type: string
 
+  AuditLogBronzeTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref AuditLogGlueDatabase
+      TableInput:
+        Name: bronze_events
+        Description: Normalized GitHub enterprise audit events stored as Parquet.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: parquet
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2020,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          projection.hour.type: integer
+          projection.hour.range: '0,23'
+          projection.hour.digits: '2'
+          storage.location.template: !Sub "s3://${WebhookS3Bucket}/audit-logs/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${WebhookS3Bucket}/audit-logs/"
+          InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+          Compressed: true
+          SerdeInfo:
+            SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+            Parameters:
+              serialization.format: '1'
+          Columns:
+            - Name: document_id
+              Type: string
+              Comment: GitHub document ID or a deterministic payload hash fallback.
+            - Name: event_timestamp
+              Type: timestamp
+              Comment: Event occurrence time normalized to UTC.
+            - Name: action
+              Type: string
+            - Name: action_category
+              Type: string
+            - Name: action_name
+              Type: string
+            - Name: operation_type
+              Type: string
+            - Name: actor
+              Type: string
+            - Name: actor_id
+              Type: bigint
+            - Name: actor_is_bot
+              Type: boolean
+            - Name: business
+              Type: string
+            - Name: business_id
+              Type: bigint
+            - Name: organization
+              Type: string
+            - Name: organization_id
+              Type: bigint
+            - Name: repository
+              Type: string
+            - Name: repository_id
+              Type: bigint
+            - Name: user
+              Type: string
+            - Name: user_id
+              Type: bigint
+            - Name: request_id
+              Type: string
+            - Name: source_ip
+              Type: string
+              Comment: Sensitive source address; restrict access in curated layers.
+            - Name: user_agent
+              Type: string
+            - Name: programmatic_access_type
+              Type: string
+            - Name: request_method
+              Type: string
+            - Name: route
+              Type: string
+            - Name: status_code
+              Type: int
+            - Name: url_path
+              Type: string
+            - Name: pull_request_id
+              Type: bigint
+            - Name: workflow_run_id
+              Type: bigint
+            - Name: raw_payload
+              Type: string
+              Comment: Sensitive original event JSON; restrict access in curated layers.
+            - Name: payload_sha256
+              Type: string
+            - Name: source_bucket
+              Type: string
+            - Name: source_object_key
+              Type: string
+            - Name: source_object_version
+              Type: string
+            - Name: source_record_index
+              Type: int
+            - Name: schema_version
+              Type: int
+            - Name: normalized_at
+              Type: timestamp
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: hour
+            Type: string
+
+  AuditLogFirehoseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/kinesisfirehose/github-audit-logs-bronze-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogFirehoseLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref AuditLogFirehoseLogGroup
+      LogStreamName: S3Delivery
+
+  AuditLogFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows the audit-log Firehose stream to write Parquet and read its Glue schema.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AuditLogFirehoseDeliveryPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InspectDestinationBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt WebhookS3Bucket.Arn
+              - Sid: ListDestinationPrefixes
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt WebhookS3Bucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - audit-logs/*
+                      - audit-logs-errors/*
+              - Sid: WriteAuditLogObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${WebhookS3Bucket.Arn}/audit-logs/*"
+                  - !Sub "${WebhookS3Bucket.Arn}/audit-logs-errors/*"
+              - Sid: ReadAuditLogSchema
+                Effect: Allow
+                Action:
+                  - glue:GetDatabase
+                  - glue:GetTable
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${AuditLogGlueDatabase}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${AuditLogGlueDatabase}/bronze_events"
+              - Sid: WriteDeliveryLogs
+                Effect: Allow
+                Action: logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${AuditLogFirehoseLogGroup}:log-stream:${AuditLogFirehoseLogStream}"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogFirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub "github-audit-logs-bronze-${Environment}"
+      DeliveryStreamType: DirectPut
+      DeliveryStreamEncryptionConfigurationInput:
+        KeyType: AWS_OWNED_CMK
+      ExtendedS3DestinationConfiguration:
+        RoleARN: !GetAtt AuditLogFirehoseRole.Arn
+        BucketARN: !GetAtt WebhookS3Bucket.Arn
+        Prefix: "audit-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/"
+        ErrorOutputPrefix: "audit-logs-errors/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/!{firehose:error-output-type}/"
+        BufferingHints:
+          IntervalInSeconds: 300
+          SizeInMBs: 64
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref AuditLogFirehoseLogGroup
+          LogStreamName: !Ref AuditLogFirehoseLogStream
+        CompressionFormat: UNCOMPRESSED
+        DataFormatConversionConfiguration:
+          Enabled: true
+          InputFormatConfiguration:
+            Deserializer:
+              HiveJsonSerDe:
+                TimestampFormats:
+                  - "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+          OutputFormatConfiguration:
+            Serializer:
+              ParquetSerDe:
+                Compression: SNAPPY
+                EnableDictionaryCompression: true
+                WriterVersion: V2
+          SchemaConfiguration:
+            CatalogId: !Ref AWS::AccountId
+            DatabaseName: !Ref AuditLogGlueDatabase
+            TableName: !Ref AuditLogBronzeTable
+            RoleARN: !GetAtt AuditLogFirehoseRole.Arn
+            Region: !Ref AWS::Region
+            VersionId: LATEST
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "github-audit-log-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogIngestQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "github-audit-log-ingest-${Environment}"
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 900
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AuditLogDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref AuditLogIngestQueue
+        - !Ref AuditLogDeadLetterQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAuditLogEventRule
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource:
+              - !GetAtt AuditLogIngestQueue.Arn
+              - !GetAtt AuditLogDeadLetterQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-audit-log-object-created-${Environment}"
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AuditLogObjectCreatedRule:
+    Type: AWS::Events::Rule
+    DependsOn: AuditLogQueuePolicy
+    Properties:
+      Name: !Sub "github-audit-log-object-created-${Environment}"
+      Description: Routes GitHub audit-log gzip object arrivals to the normalizer queue.
+      State: ENABLED
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+              - !Ref AuditLogS3Bucket
+          object:
+            key:
+              - suffix: .json.log.gz
+      Targets:
+        - Id: AuditLogIngestQueue
+          Arn: !GetAtt AuditLogIngestQueue.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt AuditLogDeadLetterQueue.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 86400
+            MaximumRetryAttempts: 10
+
+  AuditLogNormalizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/github-audit-log-normalizer-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogNormalizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Reads raw GitHub audit objects and writes normalized records to Firehose.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AuditLogNormalizerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeAuditLogQueue
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt AuditLogIngestQueue.Arn
+              - Sid: ReadRawAuditObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${AuditLogS3Bucket.Arn}/*"
+              - Sid: WriteQuarantineMetadata
+                Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${WebhookS3Bucket.Arn}/quarantine/audit-logs/*"
+              - Sid: SubmitNormalizedRecords
+                Effect: Allow
+                Action: firehose:PutRecordBatch
+                Resource: !GetAtt AuditLogFirehoseDeliveryStream.Arn
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt AuditLogNormalizerLogGroup.Arn
+              - Sid: PublishXRayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogNormalizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "github-audit-log-normalizer-${Environment}"
+      Description: Normalizes batched GitHub audit-log gzip objects for Parquet conversion.
+      CodeUri: src/audit_normalizer/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 1024
+      Timeout: 120
+      ReservedConcurrentExecutions: !Ref AuditLogNormalizerReservedConcurrency
+      Tracing: Active
+      Role: !GetAtt AuditLogNormalizerRole.Arn
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref AuditLogS3Bucket
+          DESTINATION_STREAM_NAME: !Ref AuditLogFirehoseDeliveryStream
+          QUARANTINE_BUCKET: !Ref WebhookS3Bucket
+          QUARANTINE_PREFIX: quarantine/audit-logs
+          ENVIRONMENT: !Ref Environment
+          SCHEMA_VERSION: '1'
+          MAX_COMPRESSED_BYTES: '20971520'
+          MAX_UNCOMPRESSED_BYTES: '104857600'
+      Events:
+        AuditLogQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AuditLogIngestQueue.Arn
+            BatchSize: 5
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: !Ref AuditLogNormalizerReservedConcurrency
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+
+  AuditLogReplayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/github-audit-log-replay-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogReplayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lists retained raw audit objects and enqueues controlled replay batches.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AuditLogReplayPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListRawAuditObjects
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt AuditLogS3Bucket.Arn
+              - Sid: EnqueueAuditLogReplay
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt AuditLogIngestQueue.Arn
+              - Sid: WriteReplayLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt AuditLogReplayLogGroup.Arn
+              - Sid: PublishXRayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogReplayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "github-audit-log-replay-${Environment}"
+      Description: Batch-enqueues retained raw audit objects for normalization and recovery.
+      CodeUri: src/audit_replay/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 256
+      Timeout: 300
+      Tracing: Active
+      Role: !GetAtt AuditLogReplayRole.Arn
+      Environment:
+        Variables:
+          SOURCE_BUCKET: !Ref AuditLogS3Bucket
+          DESTINATION_QUEUE_URL: !Ref AuditLogIngestQueue
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+
+  AuditLogAlarmKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: Encrypts GitHub audit-log pipeline alarm notifications.
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: kms:*
+            Resource: '*'
+          - Sid: AllowCloudWatchAlarmNotifications
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogAlarmKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/github-audit-log-alarms-${Environment}"
+      TargetKeyId: !Ref AuditLogAlarmKey
+
+  AuditLogAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "github-audit-log-alarms-${Environment}"
+      KmsMasterKeyId: !GetAtt AuditLogAlarmKey.Arn
+      Subscription:
+        Fn::If:
+          - HasAuditLogAlarmEmail
+          - - Protocol: email
+              Endpoint: !Ref AuditLogAlarmEmail
+          - Ref: AWS::NoValue
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref AuditLogAlarmTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudWatchAlarms
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AuditLogAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
+
+  AuditLogQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-queue-age-${Environment}"
+      AlarmDescription: Audit-log normalization queue has messages older than ten minutes.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuditLogIngestQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 600
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogDeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-dlq-depth-${Environment}"
+      AlarmDescription: Audit-log messages require investigation or redrive.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuditLogDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogNormalizerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-normalizer-errors-${Environment}"
+      AlarmDescription: Audit-log normalizer returned an invocation error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuditLogNormalizerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogNormalizerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-normalizer-throttles-${Environment}"
+      AlarmDescription: Audit-log normalizer concurrency is insufficient for current traffic.
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AuditLogNormalizerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogSourceFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-source-failures-${Environment}"
+      AlarmDescription: One or more raw audit objects failed transient processing.
+      Namespace: GitHubDataLake/AuditLogs
+      MetricName: SourceObjectsFailed
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogQuarantineAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-quarantine-${Environment}"
+      AlarmDescription: Audit records were quarantined for source or schema validation failures.
+      Namespace: GitHubDataLake/AuditLogs
+      MetricName: RecordsQuarantined
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogFirehoseFreshnessAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-firehose-freshness-${Environment}"
+      AlarmDescription: Audit-log Firehose delivery is more than fifteen minutes behind.
+      Namespace: AWS/Firehose
+      MetricName: DeliveryToS3.DataFreshness
+      Dimensions:
+        - Name: DeliveryStreamName
+          Value: !Ref AuditLogFirehoseDeliveryStream
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  AuditLogFirehoseDeliveryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-audit-log-firehose-delivery-${Environment}"
+      AlarmDescription: Audit-log Firehose is not successfully delivering all records to S3.
+      Namespace: AWS/Firehose
+      MetricName: DeliveryToS3.Success
+      Dimensions:
+        - Name: DeliveryStreamName
+          Value: !Ref AuditLogFirehoseDeliveryStream
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
 Outputs:
   WebhookEndpoint:
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
@@ -623,3 +1510,24 @@ Outputs:
   AuditLogRawTableName:
     Value: !Ref AuditLogRawTable
     Description: "Athena table for querying raw GitHub audit-log gzip JSON objects"
+  AuditLogBronzeTableName:
+    Value: !Ref AuditLogBronzeTable
+    Description: "Athena table for normalized GitHub audit-log Parquet records"
+  AuditLogIngestQueueUrl:
+    Value: !Ref AuditLogIngestQueue
+    Description: "SQS queue URL used for audit-log ingestion and controlled replay"
+  AuditLogDeadLetterQueueUrl:
+    Value: !Ref AuditLogDeadLetterQueue
+    Description: "SQS dead-letter queue URL for failed audit-log processing"
+  AuditLogNormalizerFunctionName:
+    Value: !Ref AuditLogNormalizerFunction
+    Description: "Lambda function that normalizes raw GitHub audit-log objects"
+  AuditLogReplayFunctionName:
+    Value: !Ref AuditLogReplayFunction
+    Description: "Lambda function for bounded audit-log backfill and replay batches"
+  AuditLogFirehoseDeliveryStreamName:
+    Value: !Ref AuditLogFirehoseDeliveryStream
+    Description: "Firehose stream that converts normalized audit logs to Parquet"
+  AuditLogAlarmTopicArn:
+    Value: !Ref AuditLogAlarmTopic
+    Description: "SNS topic for audit-log pipeline alarms"

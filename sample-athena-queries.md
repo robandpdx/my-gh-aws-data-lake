@@ -58,6 +58,198 @@ GROUP BY action
 ORDER BY event_count DESC;
 ```
 
+## Normalized audit bronze
+
+The `bronze_events` table reads Snappy-compressed Parquet produced by the audit
+normalizer. Its `year`, `month`, `day`, and `hour` partitions represent UTC
+normalization time, not `event_timestamp`. Always prune these partitions even
+when applying an event-time predicate.
+
+### Inspect normalized events
+
+```sql
+SELECT
+  event_timestamp,
+  action,
+  actor,
+  organization,
+  repository,
+  operation_type,
+  normalized_at,
+  source_object_key
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '04' AND '05'
+ORDER BY event_timestamp DESC
+LIMIT 100;
+```
+
+### Count activity by event hour and category
+
+```sql
+SELECT
+  date_trunc('hour', event_timestamp) AS event_hour,
+  action_category,
+  count(*) AS event_count,
+  count(DISTINCT actor_id) AS distinct_actors,
+  count(DISTINCT repository_id) AS distinct_repositories
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+GROUP BY 1, 2
+ORDER BY event_hour DESC, event_count DESC;
+```
+
+### Measure normalization latency
+
+```sql
+SELECT
+  action_category,
+  count(*) AS event_count,
+  avg(date_diff('second', event_timestamp, normalized_at)) AS avg_latency_seconds,
+  approx_percentile(
+    date_diff('second', event_timestamp, normalized_at),
+    0.95
+  ) AS p95_latency_seconds,
+  max(date_diff('second', event_timestamp, normalized_at)) AS max_latency_seconds
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+GROUP BY action_category
+ORDER BY p95_latency_seconds DESC;
+```
+
+### Find duplicate deliveries
+
+Duplicate bronze rows are expected under at-least-once delivery. Deduplicate on
+`document_id` in curated layers.
+
+```sql
+SELECT
+  document_id,
+  count(*) AS occurrence_count,
+  count(DISTINCT source_object_key) AS source_object_count,
+  min(normalized_at) AS first_normalized_at,
+  max(normalized_at) AS last_normalized_at
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+GROUP BY document_id
+HAVING count(*) > 1
+ORDER BY occurrence_count DESC;
+```
+
+### Detect document ID integrity conflicts
+
+A document ID associated with multiple payload hashes requires investigation
+before silver-layer deduplication.
+
+```sql
+SELECT
+  document_id,
+  count(*) AS occurrence_count,
+  count(DISTINCT payload_sha256) AS payload_versions
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+GROUP BY document_id
+HAVING count(DISTINCT payload_sha256) > 1
+ORDER BY payload_versions DESC, occurrence_count DESC;
+```
+
+### Summarize audit API request outcomes
+
+This query intentionally excludes sensitive `source_ip` and `raw_payload`
+values.
+
+```sql
+SELECT
+  request_method,
+  route,
+  status_code,
+  count(*) AS request_count,
+  count(DISTINCT actor_id) AS distinct_actors
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+  AND action = 'api.request'
+GROUP BY 1, 2, 3
+ORDER BY request_count DESC;
+```
+
+### Reconcile records by source object
+
+```sql
+SELECT
+  source_object_key,
+  source_object_version,
+  count(*) AS normalized_record_count,
+  min(source_record_index) AS first_record_index,
+  max(source_record_index) AS last_record_index,
+  min(normalized_at) AS normalized_at
+FROM github_audit_logs_bronze_dev.bronze_events
+WHERE year = '2026'
+  AND month = '09'
+  AND day = '03'
+  AND hour BETWEEN '00' AND '23'
+GROUP BY source_object_key, source_object_version
+ORDER BY normalized_at DESC;
+```
+
+### Correlate audit and webhook repository activity
+
+Join on immutable repository IDs rather than mutable repository names.
+
+```sql
+WITH audit_activity AS (
+  SELECT
+    repository_id,
+    count(*) AS audit_event_count,
+    count(DISTINCT actor_id) AS audit_actor_count
+  FROM github_audit_logs_bronze_dev.bronze_events
+  WHERE year = '2026'
+    AND month = '09'
+    AND day = '03'
+    AND hour BETWEEN '00' AND '23'
+    AND repository_id IS NOT NULL
+  GROUP BY repository_id
+),
+webhook_activity AS (
+  SELECT
+    repository.id AS repository_id,
+    max(repository.full_name) AS repository,
+    count(*) AS webhook_event_count
+  FROM github_webhooks_dev.events
+  WHERE year = '2026'
+    AND month = '09'
+    AND day = '03'
+    AND repository.id IS NOT NULL
+  GROUP BY repository.id
+)
+SELECT
+  coalesce(webhook.repository_id, audit.repository_id) AS repository_id,
+  webhook.repository,
+  coalesce(audit.audit_event_count, 0) AS audit_event_count,
+  coalesce(audit.audit_actor_count, 0) AS audit_actor_count,
+  coalesce(webhook.webhook_event_count, 0) AS webhook_event_count
+FROM audit_activity AS audit
+FULL OUTER JOIN webhook_activity AS webhook
+  ON audit.repository_id = webhook.repository_id
+ORDER BY audit_event_count DESC, webhook_event_count DESC;
+```
+
 ## GitHub webhooks
 
 The webhook table keeps common fields as typed columns and the complete

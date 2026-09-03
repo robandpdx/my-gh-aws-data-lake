@@ -1,30 +1,28 @@
-# 🚀 GitHub Webhooks to AWS S3 Parquet Pipeline
+# GitHub Webhook and Audit Log Data Lake on AWS
 
-This deployment guide outlines the infrastructure architecture and setup steps required to ingest global or organization-level GitHub webhooks, convert them to Apache Parquet format via Amazon Data Firehose, and query them seamlessly using Amazon Athena.
+This SAM application ingests GitHub webhooks and GitHub Enterprise Cloud audit
+logs, retains the original audit gzip objects, converts both sources to Apache
+Parquet, and catalogs them for Amazon Athena.
 
 ---
 
-## 🏛️ Architecture Overview
+## Architecture Overview
 
-```
-[GitHub Enterprise/Org] 
-       │ (JSON Webhook Payload over HTTPS)
-       ▼
-[Amazon API Gateway] 
-       │ (Authenticates, validates, & routes directly)
-       ▼
-[Amazon Data Firehose] 
-       │ (Buffers data & converts format using AWS Glue Schema)
-       ▼
-[Amazon S3 Bucket] (Partitioned Parquet files: year=YYYY/month=MM/day=DD/)
-       │
-       ▼
-[Amazon Athena] (Query raw logs seamlessly using SQL)
+```text
+GitHub webhooks -> API Gateway -> Data Firehose -> S3 webhooks/ Parquet
+
+GitHub audit OIDC -> versioned raw S3 -> EventBridge -> encrypted SQS
+                 -> Lambda normalizer
+                 -> Data Firehose
+                 -> S3 audit-logs/ Parquet
+             failures -> DLQ or quarantine metadata
+
+S3 Parquet -> AWS Glue Data Catalog -> Amazon Athena
 ```
 
 ---
 
-## 📦 Infrastructure Component Breakdown
+## Infrastructure Component Breakdown
 
 The pipeline leverages a completely serverless architecture to process high-throughput webhook streams efficiently without provisioning underlying servers:
 
@@ -48,9 +46,35 @@ The pipeline leverages a completely serverless architecture to process high-thro
   * Configured with a **direct service integration proxy** that uses Velocity Mapping Templates (VTL) to preserve the complete GitHub body in `raw_payload`, capture the delivery ID and event-type headers, and push the enriched record directly into Firehose.
   * Completely eliminates intermediate computing runtimes (like AWS Lambda functions) to minimize execution latency and eliminate invocation compute costs.
 
+* **Audit-log raw landing zone**
+  * Accepts GitHub's enterprise audit stream through an enterprise-scoped OIDC
+    role with only `s3:PutObject` access.
+  * Retains private, encrypted, versioned `.json.log.gz` objects as the replay
+    source of truth.
+  * Exposes `raw_events` through partition projection for direct investigation.
+
+* **Audit-log bronze normalization**
+  * Routes new audit gzip objects through EventBridge and an encrypted SQS
+    queue with a 14-day dead-letter queue.
+  * Processes up to five source objects per Lambda invocation with partial batch
+    failure reporting, bounded gzip decompression, structured logs, X-Ray, and
+    Embedded Metric Format counters.
+  * Normalizes common identities and timestamps while preserving the complete
+    source event in the restricted `raw_payload` column.
+  * Converts normalized JSON to Snappy-compressed Parquet under
+    `audit-logs/year=YYYY/month=MM/day=DD/hour=HH/`.
+
+* **Recovery and observability**
+  * Provides a manually invoked replay Lambda for prefix-based backfills or
+    explicit object-version replay.
+  * Alarms on queue age, DLQ depth, Lambda errors/throttles, source failures,
+    quarantine records, Firehose freshness, and Firehose delivery health.
+  * Publishes alarms to an encrypted SNS topic and optionally creates an email
+    subscription.
+
 ---
 
-## 🚀 Deployment Instructions
+## Deployment Instructions
 
 ### 1. Execute the Infrastructure Deployment
 From the repository root, validate and build the template, then deploy it using the AWS SAM CLI. The guided deployment saves your selections for future `sam deploy` commands:
@@ -59,6 +83,8 @@ From the repository root, validate and build the template, then deploy it using 
 export GITHUB_ENTERPRISE_SLUG="your-case-sensitive-enterprise-slug"
 # Keep false when the account already has this account-global OIDC provider.
 export CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER="false"
+# Optional; leave empty to create the alarm topic without an email subscriber.
+export AUDIT_LOG_ALARM_EMAIL=""
 
 sam validate --lint
 sam build
@@ -69,6 +95,8 @@ sam deploy --guided \
     owner=robandpdx \
     GitHubEnterpriseSlug="$GITHUB_ENTERPRISE_SLUG" \
     CreateGitHubAuditLogOidcProvider="$CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER" \
+    AuditLogAlarmEmail="$AUDIT_LOG_ALARM_EMAIL" \
+    AuditLogNormalizerReservedConcurrency=2 \
   --capabilities CAPABILITY_IAM
 ```
 
@@ -77,7 +105,8 @@ enterprise-scoped OIDC writer role for GitHub audit-log streaming. It reuses
 the account-global GitHub audit-log OIDC provider by default. Set
 `CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER=true` only if the provider does not
 already exist. The guided deployment stores the parameter values for later
-deployments.
+deployments. When an alarm email is supplied, confirm the Amazon SNS
+subscription message before expecting notifications.
 
 ### 2. Capture the Webhook Ingestion Endpoint
 Once the deployment status shows `CREATE_COMPLETE`:
@@ -143,7 +172,71 @@ See [github_audit_log_analytics_plan.md](./github_audit_log_analytics_plan.md)
 for setup, verification, normalization, Iceberg joins, Grafana serving,
 security, observability, cost, and phased implementation details.
 
-### 6. Next Steps
+### 6. Operate the Audit Bronze Layer
+
+New `.json.log.gz` objects are normalized automatically. Firehose buffers for
+up to five minutes before writing Parquet. Bronze partitions use the UTC
+**normalization time**, while `event_timestamp` records the original GitHub
+event time. Partition projection means `MSCK REPAIR TABLE` is not required for
+either audit table.
+
+Query `github_audit_logs_bronze_dev.bronze_events` using the workgroup from the
+`AthenaWorkGroupName` output. Always constrain `year`, `month`, `day`, and
+preferably `hour`; see [sample-athena-queries.md](./sample-athena-queries.md).
+Treat `source_ip` and `raw_payload` as sensitive fields and do not expose them
+to general dashboard users.
+
+Use the replay job to backfill retained objects that arrived before deployment.
+The prefix follows the raw bucket's UTC `YYYY/MM/DD/HH/mm/` layout:
+
+```bash
+export REPLAY_FUNCTION="$(aws cloudformation describe-stacks \
+  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --query 'Stacks[0].Outputs[?OutputKey==`AuditLogReplayFunctionName`].OutputValue | [0]' \
+  --output text)"
+
+aws lambda invoke \
+  --function-name "$REPLAY_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"prefix":"2026/09/03/","max_objects":1000}' \
+  /tmp/audit-log-replay.json
+
+jq . /tmp/audit-log-replay.json
+```
+
+If the response contains a `continuation_token`, invoke the function again with
+that token. To replay an exact retained version instead:
+
+```bash
+aws lambda invoke \
+  --function-name "$REPLAY_FUNCTION" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"objects":[{"key":"2026/09/03/04/45/object.json.log.gz","version_id":"VERSION_ID"}]}' \
+  /tmp/audit-log-replay.json
+```
+
+Monitor the `AuditLogIngestQueueUrl`, `AuditLogDeadLetterQueueUrl`,
+`AuditLogNormalizerFunctionName`, `AuditLogFirehoseDeliveryStreamName`, and
+`AuditLogAlarmTopicArn` stack outputs. Investigate quarantine metadata under
+`quarantine/audit-logs/`; source event bodies remain in the retained raw bucket
+and are not copied into quarantine logs.
+
+Run the focused tests and SAM checks before deployment:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+sam validate --lint
+sam build
+```
+
+At low audit volume, usage-based S3, SQS, Lambda, EventBridge, and Firehose
+charges should remain modest. The customer-managed KMS key for encrypted alarm
+notifications is the main fixed monthly resource charge; CloudWatch custom
+metrics, logs, alarms, and many small Parquet files can become material as
+volume grows. Review current `us-west-2` pricing and compact curated layers
+before broad dashboard use.
+
+### 7. Next Steps
 
 See [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md)
 for the broader webhook analytics architecture.
