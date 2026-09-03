@@ -32,6 +32,16 @@ Parameters:
     MinValue: 2
     MaxValue: 100
     Description: Reserved and maximum SQS concurrency for the audit-log normalizer.
+  WebhookSilverScheduleExpression:
+    Type: String
+    Default: rate(1 hour)
+    Description: EventBridge schedule for incremental webhook silver normalization.
+  WebhookSilverNumberOfWorkers:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 100
+    Description: Number of G.1X workers allocated to the webhook silver Glue job.
 
 Conditions:
   ShouldCreateGitHubAuditLogOidcProvider:
@@ -416,7 +426,378 @@ Resources:
         - Key: owner
           Value: !Ref owner
 
-  # 10. Immutable raw landing zone for GitHub Enterprise Cloud audit-log streaming
+  # 10. Scheduled webhook bronze-to-silver Iceberg normalization
+  WebhookSilverGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "github_webhooks_silver_${Environment}"
+        Description: Canonical and event-family GitHub webhook Iceberg tables.
+
+  GlueScriptDeployerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/github-webhook-glue-script-deployer-${Environment}"
+      RetentionInDays: 14
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  GlueScriptDeployerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Publishes the packaged webhook silver Glue script to the data-lake bucket.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GlueScriptDeployerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ManageGlueScript
+                Effect: Allow
+                Action:
+                  - s3:DeleteObject
+                  - s3:PutObject
+                Resource: !Sub "${WebhookS3Bucket.Arn}/glue-scripts/webhook-silver.py"
+              - Sid: WriteFunctionLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt GlueScriptDeployerLogGroup.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  GlueScriptDeployerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "github-webhook-glue-script-deployer-${Environment}"
+      Description: Publishes the versioned webhook silver Glue job script during deployment.
+      CodeUri: src/
+      Handler: glue_script_deployer.app.lambda_handler
+      Runtime: python3.12
+      AutoPublishAlias: live
+      Architectures:
+        - arm64
+      MemorySize: 128
+      Timeout: 60
+      Role: !GetAtt GlueScriptDeployerRole.Arn
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+
+  WebhookSilverScript:
+    Type: Custom::GlueScript
+    DependsOn: WebhookS3BucketPolicy
+    Properties:
+      ServiceToken: !GetAtt GlueScriptDeployerFunction.Arn
+      BucketName: !Ref WebhookS3Bucket
+      ScriptKey: glue-scripts/webhook-silver.py
+      PublisherVersion: !Ref GlueScriptDeployerFunction.Version
+
+  WebhookSilverGlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Reads webhook bronze Parquet and transactionally maintains silver Iceberg tables.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WebhookSilverGluePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InspectDataLakeBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt WebhookS3Bucket.Arn
+              - Sid: ListDataLakePrefixes
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt WebhookS3Bucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - webhooks
+                      - webhooks/*
+                      - silver
+                      - silver/*
+                      - quarantine/webhooks
+                      - quarantine/webhooks/*
+                      - glue-scripts/webhook-silver.py
+                      - glue-temp/webhook-silver
+                      - glue-temp/webhook-silver/*
+              - Sid: ReadBronzeAndJobScript
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub "${WebhookS3Bucket.Arn}/webhooks/*"
+                  - !Sub "${WebhookS3Bucket.Arn}/glue-scripts/webhook-silver.py"
+              - Sid: ManageSilverQuarantineAndTemporaryObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${WebhookS3Bucket.Arn}/silver/*"
+                  - !Sub "${WebhookS3Bucket.Arn}/quarantine/webhooks/*"
+                  - !Sub "${WebhookS3Bucket.Arn}/glue-temp/webhook-silver/*"
+              - Sid: ManageSilverCatalog
+                Effect: Allow
+                Action:
+                  - glue:CreateTable
+                  - glue:DeleteTable
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${WebhookSilverGlueDatabase}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${WebhookSilverGlueDatabase}/*"
+              - Sid: PublishSilverMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: GitHubDataLake/WebhookSilver
+              - Sid: WriteGlueLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  WebhookSilverJob:
+    Type: AWS::Glue::Job
+    DependsOn: WebhookSilverScript
+    Properties:
+      Name: !Sub "github-webhook-silver-${Environment}"
+      Description: Canonicalizes webhook deliveries and materializes event-family Iceberg tables.
+      Role: !GetAtt WebhookSilverGlueRole.Arn
+      GlueVersion: '5.0'
+      WorkerType: G.1X
+      NumberOfWorkers: !Ref WebhookSilverNumberOfWorkers
+      Timeout: 60
+      MaxRetries: 1
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub "s3://${WebhookS3Bucket}/glue-scripts/webhook-silver.py"
+      DefaultArguments:
+        '--job-language': python
+        '--datalake-formats': iceberg
+        '--job-bookmark-option': job-bookmark-enable
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-metrics': 'true'
+        '--enable-observability-metrics': 'true'
+        '--TempDir': !Sub "s3://${WebhookS3Bucket}/glue-temp/webhook-silver/"
+        '--environment': !Ref Environment
+        '--bronze_path': !Sub "s3://${WebhookS3Bucket}/webhooks/"
+        '--silver_database': !Ref WebhookSilverGlueDatabase
+        '--warehouse_path': !Sub "s3://${WebhookS3Bucket}/silver/"
+        '--quarantine_path': !Sub "s3://${WebhookS3Bucket}/quarantine/webhooks/"
+        '--conf': !Sub >-
+          spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+          --conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog
+          --conf spark.sql.catalog.glue_catalog.warehouse=s3://${WebhookS3Bucket}/silver/
+          --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog
+          --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+          --conf spark.sql.session.timeZone=UTC
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+        DataLayer: silver
+
+  WebhookSilverScheduleDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "github-webhook-silver-schedule-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  WebhookSilverSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Allows the webhook silver schedule to start one Glue job run.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default"
+      Policies:
+        - PolicyName: StartWebhookSilverJob
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: glue:StartJobRun
+                Resource: !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/${WebhookSilverJob}"
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt WebhookSilverScheduleDeadLetterQueue.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  WebhookSilverSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: !Sub "github-webhook-silver-schedule-${Environment}"
+      Description: Runs incremental webhook silver normalization on a fixed schedule.
+      State: ENABLED
+      ScheduleExpression: !Ref WebhookSilverScheduleExpression
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !Sub "arn:${AWS::Partition}:scheduler:::aws-sdk:glue:startJobRun"
+        RoleArn: !GetAtt WebhookSilverSchedulerRole.Arn
+        Input: !Sub '{"JobName":"${WebhookSilverJob}"}'
+        DeadLetterConfig:
+          Arn: !GetAtt WebhookSilverScheduleDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+
+  WebhookSilverJobFailureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "github-webhook-silver-job-failure-${Environment}"
+      Description: Publishes failed, timed-out, or stopped webhook silver Glue runs.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Job State Change
+        detail:
+          jobName:
+            - !Ref WebhookSilverJob
+          state:
+            - FAILED
+            - TIMEOUT
+            - STOPPED
+      Targets:
+        - Id: WebhookSilverAlarmTopic
+          Arn: !Ref AuditLogAlarmTopic
+
+  WebhookSilverQuarantineAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-webhook-silver-quarantine-${Environment}"
+      AlarmDescription: Webhook records were quarantined for validation or integrity conflicts.
+      Namespace: GitHubDataLake/WebhookSilver
+      MetricName: QuarantinedRows
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  WebhookSilverScheduleDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "github-webhook-silver-schedule-dlq-${Environment}"
+      AlarmDescription: The scheduler could not start the webhook silver Glue job.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt WebhookSilverScheduleDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  # 11. Immutable raw landing zone for GitHub Enterprise Cloud audit-log streaming
   AuditLogS3Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -1205,10 +1586,12 @@ Resources:
               AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
             Action: kms:*
             Resource: '*'
-          - Sid: AllowCloudWatchAlarmNotifications
+          - Sid: AllowMonitoringNotifications
             Effect: Allow
             Principal:
-              Service: cloudwatch.amazonaws.com
+              Service:
+                - cloudwatch.amazonaws.com
+                - events.amazonaws.com
             Action:
               - kms:Decrypt
               - kms:GenerateDataKey*
@@ -1217,7 +1600,10 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
               ArnLike:
-                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
+                aws:SourceArn:
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-webhook-silver-*"
+                  - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-webhook-silver-job-failure-${Environment}"
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -1269,7 +1655,20 @@ Resources:
               StringEquals:
                 aws:SourceAccount: !Ref AWS::AccountId
               ArnLike:
-                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
+                aws:SourceArn:
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-webhook-silver-*"
+          - Sid: AllowWebhookSilverFailureEvents
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AuditLogAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-webhook-silver-job-failure-${Environment}"
 
   AuditLogQueueAgeAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -1552,3 +1951,21 @@ Outputs:
   AuditLogAlarmTopicArn:
     Value: !Ref AuditLogAlarmTopic
     Description: "SNS topic for audit-log pipeline alarms"
+  WebhookSilverGlueDatabaseName:
+    Value: !Ref WebhookSilverGlueDatabase
+    Description: "Glue database containing canonical and event-family webhook Iceberg tables"
+  WebhookSilverGlueJobName:
+    Value: !Ref WebhookSilverJob
+    Description: "Scheduled Glue job for webhook bronze-to-silver normalization and backfills"
+  WebhookSilverScheduleName:
+    Value: !Ref WebhookSilverSchedule
+    Description: "EventBridge Scheduler schedule that starts incremental webhook silver normalization"
+  WebhookSilverScheduleDeadLetterQueueUrl:
+    Value: !Ref WebhookSilverScheduleDeadLetterQueue
+    Description: "SQS queue containing failed attempts to start the webhook silver Glue job"
+  WebhookSilverWarehouseLocation:
+    Value: !Sub "s3://${WebhookS3Bucket}/silver/"
+    Description: "S3 warehouse root for webhook silver Iceberg tables"
+  WebhookSilverQuarantineLocation:
+    Value: !Sub "s3://${WebhookS3Bucket}/quarantine/webhooks/"
+    Description: "S3 location for the webhook silver quarantine Iceberg table"

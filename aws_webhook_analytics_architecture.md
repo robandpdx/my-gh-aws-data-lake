@@ -2,6 +2,12 @@
 
 ## Executive recommendation
 
+> **Implementation status (2026-09-03):** Phase 2 is implemented for the
+> webhook silver core and six event-family tables. The deployed Glue job reads
+> bronze Parquet directly from S3, performs replay-safe Iceberg v2 merges,
+> quarantines validation and payload-hash conflicts, and runs hourly. Phase 0
+> receiver hardening and the gold layer remain separate follow-up work.
+
 Retain the current Amazon API Gateway → Amazon Data Firehose → Amazon S3 pipeline as the **bronze ingestion layer**, then add a scheduled AWS Glue Spark job that produces **Apache Iceberg v2 silver tables** and a small set of **gold aggregate tables** for dashboards.
 
 Do **not** create one physical table for every GitHub event type or event/action pair. GitHub's webhook model is polymorphic and evolves over time; a table-per-action design creates catalog sprawl, duplicated ETL logic, brittle schema management, and dashboards that must union many tiny tables.

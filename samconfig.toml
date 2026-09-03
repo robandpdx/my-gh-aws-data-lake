@@ -6,7 +6,7 @@ resolve_s3 = true
 s3_prefix = "robandpdx-gh-webhook-parquet-pipeline"
 region = "us-west-2"
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "Environment=\"dev\" owner=\"robandpdx\" GitHubEnterpriseSlug=\"volcano-coffee\" AuditLogAlarmEmail=\"robandpdx@github.com\" AuditLogNormalizerReservedConcurrency=\"2\""
+parameter_overrides = "Environment=\"dev\" owner=\"robandpdx\" GitHubEnterpriseSlug=\"volcano-coffee\" AuditLogAlarmEmail=\"robandpdx@github.com\" AuditLogNormalizerReservedConcurrency=\"2\" WebhookSilverScheduleExpression=\"rate(1 hour)\" WebhookSilverNumberOfWorkers=\"2\""
 image_repositories = []
 
 [default.global.parameters]

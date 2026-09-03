@@ -1,5 +1,88 @@
 # Sample Athena Queries
 
+## GitHub webhook silver
+
+The `github_webhooks_silver_dev` tables are Apache Iceberg v2 tables. They use
+hidden day partitioning on `received_at`, so filter directly on timestamp
+columns rather than Hive partition strings.
+
+### Reconcile canonical and quarantined deliveries
+
+```sql
+WITH canonical AS (
+  SELECT count(*) AS canonical_rows
+  FROM github_webhooks_silver_dev.events
+  WHERE received_at >= TIMESTAMP '2026-09-01 00:00:00 UTC'
+    AND received_at < TIMESTAMP '2026-09-02 00:00:00 UTC'
+),
+quarantine AS (
+  SELECT reason, count(*) AS quarantined_rows
+  FROM github_webhooks_silver_dev.quarantined_events
+  WHERE quarantined_at >= TIMESTAMP '2026-09-01 00:00:00 UTC'
+    AND quarantined_at < TIMESTAMP '2026-09-02 00:00:00 UTC'
+  GROUP BY reason
+)
+SELECT canonical.canonical_rows, quarantine.reason, quarantine.quarantined_rows
+FROM canonical
+CROSS JOIN quarantine
+ORDER BY quarantine.quarantined_rows DESC;
+```
+
+### Inspect workflow job lifecycle deliveries
+
+One row represents one webhook delivery, not one unique job. Group by
+`workflow_job_id` when computing job-level measures.
+
+```sql
+SELECT
+  workflow_job_id,
+  max_by(status, event_at) AS latest_status,
+  max_by(conclusion, event_at) AS latest_conclusion,
+  min(created_at) AS created_at,
+  min(started_at) AS started_at,
+  max(completed_at) AS completed_at,
+  max(runner_labels) AS runner_labels,
+  count(*) AS lifecycle_deliveries
+FROM github_webhooks_silver_dev.actions_workflow_jobs
+WHERE received_at >= current_timestamp - INTERVAL '7' DAY
+GROUP BY workflow_job_id
+ORDER BY completed_at DESC NULLS LAST;
+```
+
+### Summarize pull request activity
+
+```sql
+SELECT
+  date_trunc('day', event_at) AS event_day,
+  organization_login,
+  repository_full_name,
+  count_if(action = 'opened') AS opened,
+  count_if(action = 'closed' AND merged) AS merged,
+  count_if(action = 'closed' AND NOT coalesce(merged, false)) AS closed_unmerged
+FROM github_webhooks_silver_dev.pull_requests
+WHERE received_at >= current_timestamp - INTERVAL '30' DAY
+  AND event_type = 'pull_request'
+GROUP BY 1, 2, 3
+ORDER BY event_day DESC, opened DESC;
+```
+
+### Review security alert transitions
+
+```sql
+SELECT
+  event_at,
+  alert_kind,
+  repository_full_name,
+  alert_number,
+  action,
+  state,
+  severity,
+  resolution
+FROM github_webhooks_silver_dev.security_alerts
+WHERE received_at >= current_timestamp - INTERVAL '30' DAY
+ORDER BY event_at DESC;
+```
+
 ## GitHub Enterprise audit logs
 
 The `raw_events` table reads GitHub's `.json.log.gz` objects directly. Athena

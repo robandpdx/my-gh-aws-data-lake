@@ -10,6 +10,8 @@ Parquet, and catalogs them for Amazon Athena.
 
 ```text
 GitHub webhooks -> API Gateway -> Data Firehose -> S3 webhooks/ Parquet
+                                                 -> scheduled Glue 5 Spark
+                                                 -> Iceberg silver core and family tables
 
 GitHub audit OIDC -> versioned raw S3 -> EventBridge -> encrypted SQS
                  -> Lambda normalizer
@@ -30,10 +32,25 @@ The pipeline leverages a completely serverless architecture to process high-thro
   * Serves as the centralized data lake repository for long-term audit logs.
   * Configured with default **SSE-S3 (AES-256) server-side encryption** to maintain strict enterprise data security compliance.
 
-* **AWS Glue Catalog Database & Table**
+* **AWS Glue Catalog databases and tables**
   * Establishes the target relational structure for your data lake.
   * Outlines a foundational, strongly-typed schema for standard GitHub metadata properties (`id`, `event_type`, `action`, `repository`, `sender`).
   * Integrates an explicit, open-ended string column (`raw_payload`) to handle shifting polymorphic GitHub event fields gracefully, preventing schema validation dropouts.
+
+* **Webhook silver layer**
+  * Runs an hourly AWS Glue 5.0 Spark job with Glue job bookmarks and one
+    concurrent run.
+  * Creates Apache Iceberg v2 `events`, `actions_workflow_runs`,
+    `actions_workflow_jobs`, `pull_requests`, `issues`, `security_alerts`, and
+    `organization_activity` tables in `github_webhooks_silver_<environment>`.
+  * Reads the bronze S3 prefix directly because Firehose does not register
+    Glue partitions, then uses `delivery_id` Iceberg merges for replay-safe
+    materialization.
+  * Quarantines malformed deliveries and conflicting payload hashes in the
+    `quarantined_events` Iceberg table under `quarantine/webhooks/`.
+  * Publishes per-run row counts to `GitHubDataLake/WebhookSilver`, sends failed
+    Glue state changes to the alarm topic, and alarms on quarantine rows or
+    scheduler dead letters.
 
 * **Amazon Data Firehose Delivery Stream**
   * Acts as the real-time buffer engine, minimizing data pipeline latency.
@@ -102,6 +119,8 @@ sam deploy --guided \
     CreateGitHubAuditLogOidcProvider="$CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER" \
     AuditLogAlarmEmail="$AUDIT_LOG_ALARM_EMAIL" \
     AuditLogNormalizerReservedConcurrency=2 \
+    WebhookSilverScheduleExpression="rate(1 hour)" \
+    WebhookSilverNumberOfWorkers=2 \
   --capabilities CAPABILITY_IAM
 ```
 
@@ -243,7 +262,55 @@ metrics, logs, alarms, and many small Parquet files can become material as
 volume grows. Review current `us-west-2` pricing and compact curated layers
 before broad dashboard use.
 
-### 7. Next Steps
+### 7. Operate the Webhook Silver Layer
+
+The stack publishes the Glue script to `glue-scripts/webhook-silver.py` and
+creates the Iceberg tables when the first job run starts. The hourly schedule
+is a clean no-op when no bronze objects exist. To initialize or refresh the
+tables immediately, start the job returned by the
+`WebhookSilverGlueJobName` output:
+
+```bash
+export SILVER_JOB="$(aws cloudformation describe-stacks \
+  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --query 'Stacks[0].Outputs[?OutputKey==`WebhookSilverGlueJobName`].OutputValue | [0]' \
+  --output text)"
+
+aws glue start-job-run --job-name "$SILVER_JOB"
+```
+
+Incremental runs keep the source path and transformation context stable so
+Glue bookmarks can track newly written Parquet objects. Correctness does not
+depend on the bookmark: every table is merged by `delivery_id`, and conflicting
+payload hashes for one delivery ID are quarantined instead of overwritten.
+
+For an explicit calendar backfill, disable the bookmark and supply both UTC
+dates. The normal production bookmark is not advanced by this run:
+
+```bash
+aws glue start-job-run \
+  --job-name "$SILVER_JOB" \
+  --arguments '{
+    "--job-bookmark-option":"job-bookmark-disable",
+    "--start_date":"2026-08-01",
+    "--end_date":"2026-08-31"
+  }'
+```
+
+The existing bronze history predates receiver-side signature validation and a
+precise receiver timestamp. Silver marks it `legacy_unverified` and derives
+`received_at` from the Firehose UTC day prefix with
+`received_at_precision = 'day'`; it does not claim that midnight is the actual
+receipt time. Future bronze records can provide `signature_valid`,
+`trust_state`, and `received_at_epoch_ms` without changing the silver schema.
+
+Use the `WebhookSilverGlueDatabaseName`, `WebhookSilverWarehouseLocation`,
+`WebhookSilverQuarantineLocation`, and
+`WebhookSilverScheduleDeadLetterQueueUrl` outputs for querying and operations.
+See [sample-athena-queries.md](./sample-athena-queries.md) for reconciliation
+and family-table examples.
+
+### 8. Next Steps
 
 See [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md)
 for the broader webhook analytics architecture.
