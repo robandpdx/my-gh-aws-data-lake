@@ -9,6 +9,11 @@ from urllib.parse import urlparse
 PAYLOAD_VERSION = 1
 CATALOG_NAME = "glue_catalog"
 BRONZE_TRANSFORMATION_CONTEXT = "webhook_bronze_source"
+BRONZE_FILENAME_COLUMN = "_bronze_filename"
+BRONZE_MODIFIED_AT_COLUMN = "_bronze_modified_at"
+BRONZE_PARTITION_YEAR_COLUMN = "_bronze_partition_year"
+BRONZE_PARTITION_MONTH_COLUMN = "_bronze_partition_month"
+BRONZE_PARTITION_DAY_COLUMN = "_bronze_partition_day"
 
 EVENT_FAMILY_BY_TYPE = {
     "check_run": "actions",
@@ -405,6 +410,60 @@ def paths_with_objects(paths, s3_client):
     return populated_paths
 
 
+def source_read_options(arguments, populated_paths):
+    return {
+        "connection_options": {
+            "paths": populated_paths,
+            "recurse": True,
+            "basePath": arguments.bronze_path.rstrip("/") + "/",
+            "mergeSchema": "true",
+        },
+        "format_options": {
+            "attachFilename": BRONZE_FILENAME_COLUMN,
+            "attachTimestamp": BRONZE_MODIFIED_AT_COLUMN,
+        },
+    }
+
+
+def partition_values_from_path(path):
+    match = re.search(r"/year=(\d{4})/month=(\d{2})/day=(\d{2})(?:/|$)", path)
+    if not match:
+        return None
+    return match.groups()
+
+
+def _read_source(glue_context, arguments, populated_paths, functions):
+    if not arguments.start_date:
+        read_options = source_read_options(arguments, populated_paths)
+        return glue_context.create_dynamic_frame.from_options(
+            connection_type="s3",
+            connection_options=read_options["connection_options"],
+            format="parquet",
+            format_options=read_options["format_options"],
+            transformation_ctx=BRONZE_TRANSFORMATION_CONTEXT,
+        ).toDF()
+
+    source = None
+    for path in populated_paths:
+        read_options = source_read_options(arguments, [path])
+        frame = glue_context.create_dynamic_frame.from_options(
+            connection_type="s3",
+            connection_options=read_options["connection_options"],
+            format="parquet",
+            format_options=read_options["format_options"],
+        ).toDF()
+        partition_values = partition_values_from_path(path)
+        if partition_values:
+            year, month, day = partition_values
+            frame = (
+                frame.withColumn(BRONZE_PARTITION_YEAR_COLUMN, functions.lit(year))
+                .withColumn(BRONZE_PARTITION_MONTH_COLUMN, functions.lit(month))
+                .withColumn(BRONZE_PARTITION_DAY_COLUMN, functions.lit(day))
+            )
+        source = frame if source is None else source.unionByName(frame, allowMissingColumns=True)
+    return source
+
+
 def table_location(arguments, table_name):
     if table_name == "quarantined_events":
         return arguments.quarantine_path.rstrip("/") + "/"
@@ -576,8 +635,13 @@ def _family_domain_key(functions):
     )
 
 
-def _prepare_source(source, processing_run_id, functions):
-    bronze_object_path = functions.input_file_name()
+def _prepare_source(source, processing_run_id, bronze_path, functions):
+    attached_filename = _nonempty(
+        _optional_column(source, BRONZE_FILENAME_COLUMN, "string", functions),
+        functions,
+    )
+    spark_filename = _nonempty(functions.input_file_name(), functions)
+    discovered_filename = functions.coalesce(attached_filename, spark_filename)
     delivery_id = _nonempty(_optional_column(source, "id", "string", functions), functions)
     event_type = functions.lower(
         _nonempty(_optional_column(source, "event_type", "string", functions), functions)
@@ -586,17 +650,89 @@ def _prepare_source(source, processing_run_id, functions):
     received_at_epoch_ms = _optional_column(
         source, "received_at_epoch_ms", "long", functions
     )
-    path_year = functions.regexp_extract(bronze_object_path, r"/year=(\d{4})/", 1)
-    path_month = functions.regexp_extract(bronze_object_path, r"/month=(\d{2})/", 1)
-    path_day = functions.regexp_extract(bronze_object_path, r"/day=(\d{2})/", 1)
+    path_year = _nonempty(
+        functions.regexp_extract(discovered_filename, r"/year=(\d{4})/", 1),
+        functions,
+    )
+    path_month = _nonempty(
+        functions.regexp_extract(discovered_filename, r"/month=(\d{2})/", 1),
+        functions,
+    )
+    path_day = _nonempty(
+        functions.regexp_extract(discovered_filename, r"/day=(\d{2})/", 1),
+        functions,
+    )
+    partition_year = functions.coalesce(
+        _nonempty(
+            _optional_column(source, BRONZE_PARTITION_YEAR_COLUMN, "string", functions),
+            functions,
+        ),
+        path_year,
+        _nonempty(_optional_column(source, "year", "string", functions), functions),
+    )
+    partition_month = functions.lpad(
+        functions.coalesce(
+            _nonempty(
+                _optional_column(
+                    source,
+                    BRONZE_PARTITION_MONTH_COLUMN,
+                    "string",
+                    functions,
+                ),
+                functions,
+            ),
+            path_month,
+            _nonempty(_optional_column(source, "month", "string", functions), functions),
+        ),
+        2,
+        "0",
+    )
+    partition_day = functions.lpad(
+        functions.coalesce(
+            _nonempty(
+                _optional_column(
+                    source,
+                    BRONZE_PARTITION_DAY_COLUMN,
+                    "string",
+                    functions,
+                ),
+                functions,
+            ),
+            path_day,
+            _nonempty(_optional_column(source, "day", "string", functions), functions),
+        ),
+        2,
+        "0",
+    )
+    partition_prefix = functions.concat(
+        functions.lit(bronze_path.rstrip("/") + "/year="),
+        partition_year,
+        functions.lit("/month="),
+        partition_month,
+        functions.lit("/day="),
+        partition_day,
+        functions.lit("/"),
+    )
+    bronze_object_path = (
+        functions.when(discovered_filename.rlike(r"^[a-z][a-z0-9+.-]*://"), discovered_filename)
+        .when(discovered_filename.isNotNull(), functions.concat(partition_prefix, discovered_filename))
+        .otherwise(partition_prefix)
+    )
     partition_timestamp = functions.to_timestamp(
-        functions.concat_ws("-", path_year, path_month, path_day),
+        functions.concat_ws("-", partition_year, partition_month, partition_day),
         "yyyy-MM-dd",
     )
     precise_received_at = functions.to_timestamp(
         functions.from_unixtime(received_at_epoch_ms.cast("double") / 1000.0)
     )
-    received_at = functions.coalesce(precise_received_at, partition_timestamp)
+    object_modified_at = _optional_column(
+        source, BRONZE_MODIFIED_AT_COLUMN, "timestamp", functions
+    )
+    received_at = functions.coalesce(
+        precise_received_at,
+        object_modified_at,
+        partition_timestamp,
+    )
     signature_valid = _optional_column(source, "signature_valid", "boolean", functions)
     source_trust_state = _nonempty(
         _optional_column(source, "trust_state", "string", functions), functions
@@ -622,6 +758,7 @@ def _prepare_source(source, processing_run_id, functions):
         ).alias("event_family"),
         received_at.alias("received_at"),
         functions.when(received_at_epoch_ms.isNotNull(), "millisecond")
+        .when(object_modified_at.isNotNull(), "object_modified")
         .otherwise("day")
         .alias("received_at_precision"),
         functions.coalesce(_event_at_column(functions), received_at).alias("event_at"),
@@ -923,9 +1060,13 @@ def _family_frame(events, table_name, functions):
 def _merge_frame(frame, spark, database_name, table_name, key_column):
     source_view = f"incoming_{table_name}_{uuid.uuid4().hex}"
     columns = [column_name for column_name, _ in TABLE_DEFINITIONS[table_name]["columns"]]
-    frame.select(*columns).createOrReplaceTempView(source_view)
-    spark.sql(merge_sql(database_name, table_name, source_view, key_column))
-    spark.catalog.dropTempView(source_view)
+    materialized = frame.select(*columns).localCheckpoint(eager=True)
+    materialized.createOrReplaceTempView(source_view)
+    try:
+        spark.sql(merge_sql(database_name, table_name, source_view, key_column))
+    finally:
+        spark.catalog.dropTempView(source_view)
+        materialized.unpersist()
 
 
 def _emit_metrics(environment, metrics):
@@ -982,15 +1123,12 @@ def run(argv=None):
         job.commit()
         return metrics
 
-    source = glue_context.create_dynamic_frame.from_options(
-        connection_type="s3",
-        connection_options={
-            "paths": populated_source_paths,
-            "recurse": True,
-        },
-        format="parquet",
-        transformation_ctx=BRONZE_TRANSFORMATION_CONTEXT,
-    ).toDF()
+    source = _read_source(
+        glue_context,
+        arguments,
+        populated_source_paths,
+        functions,
+    )
     source_count = source.count()
     metrics = {"SourceRows": source_count}
     if source_count == 0:
@@ -999,7 +1137,12 @@ def run(argv=None):
         return metrics
 
     processing_run_id = arguments.JOB_RUN_ID or str(uuid.uuid4())
-    prepared = _prepare_source(source, processing_run_id, functions).cache()
+    prepared = _prepare_source(
+        source,
+        processing_run_id,
+        arguments.bronze_path,
+        functions,
+    ).cache()
     invalid = prepared.where(functions.col("reason").isNotNull())
     eligible = prepared.where(functions.col("reason").isNull()).drop(
         "reason", "json_valid", "family_domain_key"

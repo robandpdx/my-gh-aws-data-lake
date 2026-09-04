@@ -298,11 +298,18 @@ aws glue start-job-run \
 ```
 
 The existing bronze history predates receiver-side signature validation and a
-precise receiver timestamp. Silver marks it `legacy_unverified` and derives
-`received_at` from the Firehose UTC day prefix with
-`received_at_precision = 'day'`; it does not claim that midnight is the actual
-receipt time. Future bronze records can provide `signature_valid`,
-`trust_state`, and `received_at_epoch_ms` without changing the silver schema.
+precise receiver timestamp. Bounded backfills mark it `legacy_unverified` and
+derive `received_at` from the Firehose UTC day prefix with
+`received_at_precision = 'day'`; midnight is a partition marker, not the actual
+receipt time. New webhook bronze records include API Gateway's
+`received_at_epoch_ms`, which silver stores with millisecond precision. Future
+receiver hardening can add `signature_valid` and `trust_state` without changing
+the silver schema.
+
+Quarantine is append-only operational history. A record remains visible after
+a corrected replay successfully materializes it in `events`; use
+`processing_run_id` and the latest successful job run when distinguishing an
+active data-quality problem from a resolved historical failure.
 
 Use the `WebhookSilverGlueDatabaseName`, `WebhookSilverWarehouseLocation`,
 `WebhookSilverQuarantineLocation`, and

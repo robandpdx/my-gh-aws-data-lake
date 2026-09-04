@@ -15,6 +15,45 @@ class FakeS3:
         return {"KeyCount": key_count}
 
 
+class FakeMergeFrame:
+    def __init__(self):
+        self.selected_columns = None
+        self.checkpoint_eager = None
+        self.view_name = None
+        self.unpersisted = False
+
+    def select(self, *columns):
+        self.selected_columns = columns
+        return self
+
+    def localCheckpoint(self, eager):
+        self.checkpoint_eager = eager
+        return self
+
+    def createOrReplaceTempView(self, view_name):
+        self.view_name = view_name
+
+    def unpersist(self):
+        self.unpersisted = True
+
+
+class FakeCatalog:
+    def __init__(self):
+        self.dropped_views = []
+
+    def dropTempView(self, view_name):
+        self.dropped_views.append(view_name)
+
+
+class FakeSpark:
+    def __init__(self):
+        self.catalog = FakeCatalog()
+        self.statements = []
+
+    def sql(self, statement):
+        self.statements.append(statement)
+
+
 class WebhookSilverJobTests(unittest.TestCase):
     def test_classifies_promoted_and_unmodeled_event_types(self):
         self.assertEqual(job.event_family("workflow_job"), "actions")
@@ -117,6 +156,37 @@ class WebhookSilverJobTests(unittest.TestCase):
         self.assertEqual(s3.requests[0]["Bucket"], "example")
         self.assertEqual(s3.requests[0]["MaxKeys"], 1)
 
+    def test_configures_source_metadata_and_partition_discovery(self):
+        arguments = Namespace(bronze_path="s3://example/webhooks/")
+        paths = ["s3://example/webhooks/year=2026/month=09/day=04/"]
+
+        options = job.source_read_options(arguments, paths)
+
+        self.assertEqual(options["connection_options"]["paths"], paths)
+        self.assertEqual(
+            options["connection_options"]["basePath"],
+            "s3://example/webhooks/",
+        )
+        self.assertEqual(options["connection_options"]["mergeSchema"], "true")
+        self.assertEqual(
+            options["format_options"],
+            {
+                "attachFilename": job.BRONZE_FILENAME_COLUMN,
+                "attachTimestamp": job.BRONZE_MODIFIED_AT_COLUMN,
+            },
+        )
+
+    def test_extracts_partition_values_from_a_bounded_source_path(self):
+        self.assertEqual(
+            job.partition_values_from_path(
+                "s3://example/webhooks/year=2026/month=09/day=04/"
+            ),
+            ("2026", "09", "04"),
+        )
+        self.assertIsNone(
+            job.partition_values_from_path("s3://example/webhooks/")
+        )
+
     def test_generates_iceberg_v2_ddl_with_a_dedicated_location(self):
         statement = job.create_table_sql(
             "github_webhooks_silver_dev",
@@ -140,6 +210,23 @@ class WebhookSilverJobTests(unittest.TestCase):
         self.assertIn("ON target.`delivery_id` = source.`delivery_id`", statement)
         self.assertIn("WHEN MATCHED THEN UPDATE SET", statement)
         self.assertIn("WHEN NOT MATCHED THEN INSERT", statement)
+
+    def test_materializes_nondeterministic_lineage_before_merge(self):
+        frame = FakeMergeFrame()
+        spark = FakeSpark()
+
+        job._merge_frame(
+            frame,
+            spark,
+            "github_webhooks_silver_dev",
+            "events",
+            "delivery_id",
+        )
+
+        self.assertTrue(frame.checkpoint_eager)
+        self.assertEqual(frame.view_name, spark.catalog.dropped_views[0])
+        self.assertTrue(frame.unpersisted)
+        self.assertIn("MERGE INTO", spark.statements[0])
 
     @staticmethod
     def _required_arguments():

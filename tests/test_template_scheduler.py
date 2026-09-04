@@ -18,6 +18,20 @@ class SchedulerTemplateTests(unittest.TestCase):
             template,
         )
 
+    def test_webhook_ingestion_records_the_request_epoch(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("- Name: received_at_epoch_ms", template)
+        self.assertEqual(
+            template.count("#set($receivedAtEpochMs = $context.requestTimeEpoch)"),
+            2,
+        )
+        self.assertEqual(
+            template.count("${!quote}received_at_epoch_ms${!quote}:${!receivedAtEpochMs}"),
+            2,
+        )
+        self.assertIn("WebhookDeploymentV13", template)
+
 
 if __name__ == "__main__":
     unittest.main()

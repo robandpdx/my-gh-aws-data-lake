@@ -136,6 +136,9 @@ Resources:
             - Name: id
               Type: string
               Comment: "GitHub Event ID"
+            - Name: received_at_epoch_ms
+              Type: bigint
+              Comment: "API Gateway request receipt time as Unix epoch milliseconds"
             - Name: event_type
               Type: string
               Comment: "GitHub Event Type header"
@@ -319,6 +322,7 @@ Resources:
             #set($rawPayload = $util.escapeJavaScript($input.body).replaceAll("\\'","'"))
             #set($deliveryId = $util.escapeJavaScript($input.params().header.get('X-GitHub-Delivery')).replaceAll("\\'","'"))
             #set($eventType = $util.escapeJavaScript($input.params().header.get('X-GitHub-Event')).replaceAll("\\'","'"))
+            #set($receivedAtEpochMs = $context.requestTimeEpoch)
             #set($action = '')
             #if($root.containsKey('action'))
               #set($action = $util.escapeJavaScript($root.action).replaceAll("\\'","'"))
@@ -333,7 +337,7 @@ Resources:
               #set($sender = $input.json('$.sender'))
               #set($senderField = ",${!quote}sender${!quote}:${!sender}")
             #end
-            #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
+            #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}received_at_epoch_ms${!quote}:${!receivedAtEpochMs},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
             {
               "DeliveryStreamName": "${FirehoseDeliveryStream}",
               "Record": {
@@ -348,6 +352,7 @@ Resources:
             #set($rawPayload = $util.escapeJavaScript($payload).replaceAll("\\'","'"))
             #set($deliveryId = $util.escapeJavaScript($input.params().header.get('X-GitHub-Delivery')).replaceAll("\\'","'"))
             #set($eventType = $util.escapeJavaScript($input.params().header.get('X-GitHub-Event')).replaceAll("\\'","'"))
+            #set($receivedAtEpochMs = $context.requestTimeEpoch)
             #set($action = '')
             #if($parsedPayload.containsKey('action'))
               #set($action = $util.escapeJavaScript($parsedPayload.action).replaceAll("\\'","'"))
@@ -369,7 +374,7 @@ Resources:
               #set($senderJson = "{${!quote}id${!quote}:$sender.id,${!quote}login${!quote}:${!quote}${!senderLogin}${!quote},${!quote}type${!quote}:${!quote}${!senderType}${!quote}}")
               #set($senderField = ",${!quote}sender${!quote}:${!senderJson}")
             #end
-            #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
+            #set($enrichedPayload = "{${!quote}id${!quote}:${!quote}${!deliveryId}${!quote},${!quote}received_at_epoch_ms${!quote}:${!receivedAtEpochMs},${!quote}event_type${!quote}:${!quote}${!eventType}${!quote},${!quote}action${!quote}:${!quote}${!action}${!quote}${!repositoryField}${!senderField},${!quote}raw_payload${!quote}:${!quote}${!rawPayload}${!quote}}")
             {
               "DeliveryStreamName": "${FirehoseDeliveryStream}",
               "Record": {
@@ -390,7 +395,7 @@ Resources:
 
   # API Gateway deployments are immutable snapshots. Bump this logical ID when
   # the method or integration changes so CloudFormation publishes a new snapshot.
-  WebhookDeploymentV12:
+  WebhookDeploymentV13:
     Type: AWS::ApiGateway::Deployment
     DependsOn: WebhookPostMethod
     Properties:
@@ -399,7 +404,7 @@ Resources:
   WebhookStage:
     Type: AWS::ApiGateway::Stage
     Properties:
-      DeploymentId: !Ref WebhookDeploymentV12
+      DeploymentId: !Ref WebhookDeploymentV13
       RestApiId: !Ref WebhookApi
       StageName: !Ref Environment
       Tags:
