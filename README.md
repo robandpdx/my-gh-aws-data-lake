@@ -138,13 +138,30 @@ Once the deployment status shows `CREATE_COMPLETE`:
 2. Locate and copy the value corresponding to the **`WebhookEndpoint`** key.
 
 ### 3. Configure the GitHub Webhook Settings
-1. Open your **GitHub Enterprise Portal** or individual **Organization Profile Settings** page.
-2. Select **Settings** -> **Webhooks** from the left navigation tree, then click **Add webhook**.
+GitHub enterprise global webhooks only expose events whose documented
+availability includes `business`. They can populate the Actions and
+organization-activity silver tables, but they cannot emit `issues`,
+`issue_comment`, `pull_request`, pull-request review, or repository security
+alert events. Selecting **Send me everything** does not add event types that
+are unavailable to global webhooks.
+
+To populate the `issues`, `pull_requests`, and `security_alerts` silver tables,
+create an organization webhook in each organization you want to ingest, or use
+a GitHub App installed in those organizations:
+
+1. Open the organization's **Settings** page.
+2. Select **Webhooks** from the left navigation tree, then click **Add webhook**.
 3. **Payload URL:** Paste the `WebhookEndpoint` URL retrieved from your CloudFormation Outputs step.
 4. **Content type:** Change the dropdown selection to `application/json`.
 5. **Secret:** Input a complex string password to cryptographically sign all inbound webhook payloads.
-6. **Trigger Events:** Choose either "Send me everything" or select specific targeted operational event flags (such as `push`, `pull_request`, or `workflow_job`).
+6. **Trigger Events:** Select the events needed by the silver tables. At minimum,
+   enable **Issues**, **Issue comments**, **Pull requests**, **Pull request
+   reviews**, and **Pull request review comments**. Enable the code scanning,
+   Dependabot, and secret scanning alert events when collecting security data.
 7. Click **Add webhook** to activate real-time stream ingestion.
+
+Use an enterprise global webhook separately when collecting enterprise-wide
+`workflow_job`, `workflow_run`, repository, and organization activity.
 
 ### Troubleshooting: GitHub Shows Success but S3 Is Empty
 
