@@ -117,6 +117,7 @@ Use separate Glue databases to make lifecycle, permissions, and table intent obv
 - `github_webhooks_silver_dev`
 - `github_webhooks_gold_dev`
 - `github_copilot_bronze_dev`
+- `github_copilot_silver_dev`
 
 The deployed bronze ingestion table is `github_webhooks_bronze_dev.events`.
 The optional Copilot collector exposes `billing_usage` and `usage_reports` in
@@ -145,15 +146,21 @@ s3://github-data-lake-dev-953721827634/
 │       └── usage/                    # stable usage NDJSON envelopes
 │           └── year=YYYY/month=MM/day=DD/report_type=TYPE/
 ├── silver/
-│   └── webhooks/
-│       ├── events/
-│       ├── actions_workflow_runs/
-│       ├── actions_workflow_jobs/
-│       ├── push_events/
-│       ├── pull_requests/
-│       ├── issues/
-│       ├── security_alerts/
-│       └── organization_activity/
+│   ├── webhooks/
+│   │   ├── events/
+│   │   ├── actions_workflow_runs/
+│   │   ├── actions_workflow_jobs/
+│   │   ├── push_events/
+│   │   ├── pull_requests/
+│   │   ├── issues/
+│   │   ├── security_alerts/
+│   │   └── organization_activity/
+│   └── copilot/
+│       ├── billing_usage_daily/
+│       ├── enterprise_usage_daily/
+│       ├── user_usage_daily/
+│       ├── repository_usage_daily/
+│       └── user_team_memberships_daily/
 ├── gold/
 │   ├── event_activity_hourly/
 │   ├── repository_activity_daily/
@@ -162,7 +169,8 @@ s3://github-data-lake-dev-953721827634/
 │   └── security_alert_activity_daily/
 ├── quarantine/
 │   ├── webhooks/                     # validation and integrity conflicts
-│   └── audit-logs/                   # normalization failures
+│   ├── audit-logs/                   # normalization failures
+│   └── copilot/                      # invalid billing and usage envelopes
 ├── errors/
 │   ├── webhooks/                     # webhook Firehose failures
 │   └── audit-logs/                   # audit-log Firehose failures
@@ -174,12 +182,12 @@ their analytical dataset name beneath `silver/` or `gold/`, and operational
 artifacts retain purpose-specific prefixes such as `athena-results/` and
 `glue-scripts/`.
 
-The Copilot year/month/day partitions represent the GitHub report day, while
-`collection_date` identifies a particular reconciliation snapshot. Keep raw
-and bronze snapshots immutable across collection dates; use the latest snapshot
-per report day in analytical queries. Promote fields to silver only after real
-enterprise, user, repository, and user-team payloads establish stable types and
-keys.
+The Copilot bronze year/month/day partitions represent the GitHub report day,
+while `collection_date` identifies a reconciliation snapshot. The Copilot
+silver Iceberg tables use hidden day partitioning on typed `report_day` and
+conditional natural-key merges so older backfills cannot replace newer
+snapshots. Stable scalar fields are typed; evolving nested breakdowns and the
+source record remain JSON for forward compatibility.
 
 Use distinct KMS keys or key policies where raw payload sensitivity differs from aggregates. Do not point an Iceberg table at a prefix shared with non-Iceberg files.
 

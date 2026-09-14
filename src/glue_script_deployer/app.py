@@ -4,7 +4,11 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "webhook_silver" / "job.py"
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_PATHS = {
+    "webhook_silver": SOURCE_ROOT / "webhook_silver" / "job.py",
+    "copilot_silver": SOURCE_ROOT / "copilot_silver" / "job.py",
+}
 
 _clients = {}
 
@@ -17,11 +21,15 @@ def _client(service_name):
     return _clients[service_name]
 
 
-def _publish_script(bucket, key):
+def _publish_script(bucket, key, script_name="webhook_silver"):
+    try:
+        script_path = SCRIPT_PATHS[script_name]
+    except KeyError as error:
+        raise ValueError(f"Unsupported Glue script: {script_name}") from error
     _client("s3").put_object(
         Bucket=bucket,
         Key=key,
-        Body=SCRIPT_PATH.read_bytes(),
+        Body=script_path.read_bytes(),
         ContentType="text/x-python",
         ServerSideEncryption="AES256",
     )
@@ -57,13 +65,14 @@ def lambda_handler(event, context):
     properties = event["ResourceProperties"]
     bucket = properties["BucketName"]
     key = properties["ScriptKey"]
+    script_name = properties.get("ScriptName", "webhook_silver")
     physical_resource_id = f"s3://{bucket}/{key}"
 
     try:
         if event["RequestType"] == "Delete":
             _delete_script(bucket, key)
         else:
-            _publish_script(bucket, key)
+            _publish_script(bucket, key, script_name)
             if event["RequestType"] == "Update":
                 old_properties = event.get("OldResourceProperties", {})
                 old_bucket = old_properties.get("BucketName")

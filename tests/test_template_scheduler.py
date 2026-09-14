@@ -107,6 +107,27 @@ class SchedulerTemplateTests(unittest.TestCase):
         self.assertIn("projection.year.range: '2024,2040'", template)
         self.assertGreaterEqual(template.count("projection.enabled: 'true'"), 4)
 
+    def test_copilot_silver_job_uses_a_dedicated_iceberg_warehouse(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('Name: !Sub "github_copilot_silver_${Environment}"', template)
+        self.assertIn("  CopilotSilverJob:", template)
+        self.assertIn("ScriptName: copilot_silver", template)
+        self.assertIn("glue-scripts/copilot-silver.py", template)
+        self.assertIn("bronze/copilot/billing/", template)
+        self.assertIn("bronze/copilot/usage/", template)
+        self.assertIn("silver/copilot/", template)
+        self.assertIn("quarantine/copilot/", template)
+
+    def test_copilot_silver_runs_after_daily_collection(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("Default: cron(30 10 * * ? *)", template)
+        self.assertIn("  CopilotSilverSchedule:", template)
+        self.assertIn("  CopilotSilverScheduleDeadLetterQueue:", template)
+        self.assertIn("  CopilotSilverJobFailureRule:", template)
+        self.assertIn("cloudwatch:namespace: GitHubDataLake/CopilotSilver", template)
+
 
 if __name__ == "__main__":
     unittest.main()

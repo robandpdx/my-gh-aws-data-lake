@@ -1,5 +1,119 @@
 # Sample Athena Queries
 
+## GitHub Copilot silver
+
+The `github_copilot_silver_dev` tables are Apache Iceberg v2 tables with hidden
+day partitioning on typed `report_day`. Filter directly on that date column.
+
+### Daily billed Copilot consumption
+
+```sql
+SELECT
+  report_day,
+  report_type,
+  organization_login,
+  product,
+  sku,
+  model,
+  sum(net_quantity) AS net_quantity,
+  sum(net_amount) AS net_amount
+FROM github_copilot_silver_dev.billing_usage_daily
+WHERE report_day BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'
+GROUP BY 1, 2, 3, 4, 5, 6
+ORDER BY report_day DESC, net_amount DESC;
+```
+
+### Enterprise adoption and code activity
+
+```sql
+SELECT
+  report_day,
+  daily_active_users,
+  weekly_active_users,
+  monthly_active_users,
+  user_initiated_interaction_count,
+  code_generation_activity_count,
+  code_acceptance_activity_count,
+  loc_added_sum,
+  loc_deleted_sum,
+  daily_active_cli_users,
+  daily_active_copilot_app_users
+FROM github_copilot_silver_dev.enterprise_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day;
+```
+
+### Users by AI adoption phase
+
+User-level activity is identifiable employee data; apply a restricted Athena
+role and aggregate before publishing it to broad dashboards.
+
+```sql
+SELECT
+  report_day,
+  ai_adoption_phase_number,
+  ai_adoption_phase,
+  count(*) AS users,
+  sum(ai_credits_used) AS ai_credits_used,
+  sum(user_initiated_interaction_count) AS interactions,
+  sum(code_acceptance_activity_count) AS acceptances
+FROM github_copilot_silver_dev.user_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+GROUP BY 1, 2, 3
+ORDER BY report_day, ai_adoption_phase_number;
+```
+
+### Repository pull-request activity
+
+```sql
+SELECT
+  report_day,
+  repository_full_name,
+  pull_requests_created,
+  pull_requests_created_by_copilot,
+  pull_requests_reviewed,
+  pull_requests_reviewed_by_copilot,
+  pull_requests_merged,
+  median_minutes_to_merge
+FROM github_copilot_silver_dev.repository_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day DESC, pull_requests_created DESC;
+```
+
+### Team-level daily usage
+
+GitHub excludes teams with fewer than five seated Copilot users. A missing team
+day therefore does not necessarily indicate collection failure.
+
+```sql
+SELECT
+  membership.report_day,
+  membership.organization_id,
+  membership.team_slug,
+  count(DISTINCT membership.user_id) AS active_users,
+  sum(usage.ai_credits_used) AS ai_credits_used,
+  sum(usage.user_initiated_interaction_count) AS interactions,
+  sum(usage.code_acceptance_activity_count) AS acceptances
+FROM github_copilot_silver_dev.user_team_memberships_daily AS membership
+JOIN github_copilot_silver_dev.user_usage_daily AS usage
+  ON membership.report_day = usage.report_day
+ AND membership.enterprise_id = usage.enterprise_id
+ AND membership.user_id = usage.user_id
+WHERE membership.report_day >= current_date - INTERVAL '30' DAY
+GROUP BY 1, 2, 3
+ORDER BY membership.report_day DESC, active_users DESC;
+```
+
+### Inspect silver quarantine
+
+```sql
+SELECT report_day, source, report_type, reason, count(*) AS records
+FROM github_copilot_silver_dev.quarantined_records
+WHERE quarantined_at >= current_timestamp - INTERVAL '7' DAY
+GROUP BY 1, 2, 3, 4
+ORDER BY records DESC;
+```
+
 ## GitHub Copilot bronze
 
 Copilot partitions represent the GitHub report day. Recent report days have

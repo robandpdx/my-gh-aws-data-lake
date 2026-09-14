@@ -63,6 +63,16 @@ Parameters:
     MinValue: 2
     MaxValue: 20
     Description: Reserved and maximum SQS concurrency for Copilot report workers.
+  CopilotSilverScheduleExpression:
+    Type: String
+    Default: cron(30 10 * * ? *)
+    Description: EventBridge schedule for daily Copilot bronze-to-silver normalization in UTC.
+  CopilotSilverNumberOfWorkers:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 20
+    Description: Number of G.1X workers allocated to the Copilot silver Glue job.
 
 Rules:
   CopilotSecretRequiredWhenEnabled:
@@ -513,7 +523,9 @@ Resources:
                 Action:
                   - s3:DeleteObject
                   - s3:PutObject
-                Resource: !Sub "${DataLakeS3Bucket.Arn}/glue-scripts/webhook-silver.py"
+                Resource:
+                  - !Sub "${DataLakeS3Bucket.Arn}/glue-scripts/webhook-silver.py"
+                  - !Sub "${DataLakeS3Bucket.Arn}/glue-scripts/copilot-silver.py"
               - Sid: WriteFunctionLogs
                 Effect: Allow
                 Action:
@@ -554,6 +566,7 @@ Resources:
       ServiceToken: !GetAtt GlueScriptDeployerFunction.Arn
       BucketName: !Ref DataLakeS3Bucket
       ScriptKey: glue-scripts/webhook-silver.py
+      ScriptName: webhook_silver
       PublisherVersion: !Ref GlueScriptDeployerFunction.Version
 
   WebhookSilverGlueRole:
@@ -1649,6 +1662,7 @@ Resources:
                   - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-webhook-silver-*"
                   - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-copilot-*"
                   - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-webhook-silver-job-failure-${Environment}"
+                  - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-copilot-silver-job-failure-${Environment}"
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -1715,6 +1729,17 @@ Resources:
                 aws:SourceAccount: !Ref AWS::AccountId
               ArnEquals:
                 aws:SourceArn: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-webhook-silver-job-failure-${Environment}"
+          - Sid: AllowCopilotSilverFailureEvents
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AuditLogAlarmTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-copilot-silver-job-failure-${Environment}"
 
   AuditLogQueueAgeAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -2530,6 +2555,327 @@ Resources:
         - Key: Project
           Value: github-data-lake
 
+  # 13. Scheduled Copilot bronze-to-silver Iceberg normalization
+  CopilotSilverGlueDatabase:
+    Type: AWS::Glue::Database
+    Condition: ShouldEnableCopilotCollection
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "github_copilot_silver_${Environment}"
+        Description: Reconciliation-aware typed GitHub Copilot billing and usage Iceberg tables.
+
+  CopilotSilverScript:
+    Type: Custom::GlueScript
+    Condition: ShouldEnableCopilotCollection
+    DependsOn: DataLakeS3BucketPolicy
+    Properties:
+      ServiceToken: !GetAtt GlueScriptDeployerFunction.Arn
+      BucketName: !Ref DataLakeS3Bucket
+      ScriptKey: glue-scripts/copilot-silver.py
+      ScriptName: copilot_silver
+      PublisherVersion: !Ref GlueScriptDeployerFunction.Version
+
+  CopilotSilverGlueRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Description: Reads Copilot bronze NDJSON and transactionally maintains typed silver Iceberg tables.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CopilotSilverGluePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: InspectDataLakeBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt DataLakeS3Bucket.Arn
+              - Sid: ListCopilotDataLakePrefixes
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt DataLakeS3Bucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - bronze/copilot/billing
+                      - bronze/copilot/billing/*
+                      - bronze/copilot/usage
+                      - bronze/copilot/usage/*
+                      - silver/copilot
+                      - silver/copilot/*
+                      - quarantine/copilot
+                      - quarantine/copilot/*
+                      - glue-scripts/copilot-silver.py
+                      - glue-temp/copilot-silver
+                      - glue-temp/copilot-silver/*
+              - Sid: ReadCopilotBronzeAndJobScript
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub "${DataLakeS3Bucket.Arn}/bronze/copilot/billing/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/bronze/copilot/usage/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/glue-scripts/copilot-silver.py"
+              - Sid: ManageCopilotSilverQuarantineAndTemporaryObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${DataLakeS3Bucket.Arn}/silver/copilot/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/quarantine/copilot/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/glue-temp/copilot-silver/*"
+              - Sid: ManageCopilotSilverCatalog
+                Effect: Allow
+                Action:
+                  - glue:CreateTable
+                  - glue:DeleteTable
+                  - glue:GetDatabase
+                  - glue:GetDatabases
+                  - glue:GetTable
+                  - glue:GetTables
+                  - glue:GetTableVersion
+                  - glue:GetTableVersions
+                  - glue:UpdateTable
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:database/${CopilotSilverGlueDatabase}"
+                  - !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:table/${CopilotSilverGlueDatabase}/*"
+              - Sid: PublishCopilotSilverMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: GitHubDataLake/CopilotSilver
+              - Sid: WriteCopilotSilverGlueLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/*"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotSilverJob:
+    Type: AWS::Glue::Job
+    Condition: ShouldEnableCopilotCollection
+    DependsOn: CopilotSilverScript
+    Properties:
+      Name: !Sub "github-copilot-silver-${Environment}"
+      Description: Reconciles Copilot bronze snapshots into typed billing and usage Iceberg tables.
+      Role: !GetAtt CopilotSilverGlueRole.Arn
+      GlueVersion: '5.0'
+      WorkerType: G.1X
+      NumberOfWorkers: !Ref CopilotSilverNumberOfWorkers
+      Timeout: 60
+      MaxRetries: 1
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Command:
+        Name: glueetl
+        PythonVersion: '3'
+        ScriptLocation: !Sub "s3://${DataLakeS3Bucket}/glue-scripts/copilot-silver.py"
+      DefaultArguments:
+        '--job-language': python
+        '--datalake-formats': iceberg
+        '--job-bookmark-option': job-bookmark-enable
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-metrics': 'true'
+        '--enable-observability-metrics': 'true'
+        '--TempDir': !Sub "s3://${DataLakeS3Bucket}/glue-temp/copilot-silver/"
+        '--environment': !Ref Environment
+        '--billing_bronze_path': !Sub "s3://${DataLakeS3Bucket}/bronze/copilot/billing/"
+        '--usage_bronze_path': !Sub "s3://${DataLakeS3Bucket}/bronze/copilot/usage/"
+        '--silver_database': !Ref CopilotSilverGlueDatabase
+        '--warehouse_path': !Sub "s3://${DataLakeS3Bucket}/silver/copilot/"
+        '--quarantine_path': !Sub "s3://${DataLakeS3Bucket}/quarantine/copilot/"
+        '--conf': !Sub >-
+          spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+          --conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog
+          --conf spark.sql.catalog.glue_catalog.warehouse=s3://${DataLakeS3Bucket}/silver/copilot/
+          --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog
+          --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+          --conf spark.sql.session.timeZone=UTC
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+        DataLayer: silver
+
+  CopilotSilverScheduleDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      QueueName: !Sub "github-copilot-silver-schedule-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotSilverSchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Description: Allows the Copilot silver schedule to start one Glue job run.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default"
+      Policies:
+        - PolicyName: StartCopilotSilverJob
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: glue:StartJobRun
+                Resource: !Sub "arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/${CopilotSilverJob}"
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CopilotSilverScheduleDeadLetterQueue.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotSilverSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Name: !Sub "github-copilot-silver-schedule-${Environment}"
+      Description: Runs Copilot bronze-to-silver normalization after daily collection.
+      State: ENABLED
+      ScheduleExpression: !Ref CopilotSilverScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !Sub "arn:${AWS::Partition}:scheduler:::aws-sdk:glue:startJobRun"
+        RoleArn: !GetAtt CopilotSilverSchedulerRole.Arn
+        Input: !Sub '{"JobName":"${CopilotSilverJob}"}'
+        DeadLetterConfig:
+          Arn: !GetAtt CopilotSilverScheduleDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+
+  CopilotSilverJobFailureRule:
+    Type: AWS::Events::Rule
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Name: !Sub "github-copilot-silver-job-failure-${Environment}"
+      Description: Publishes failed, timed-out, or stopped Copilot silver Glue runs.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.glue
+        detail-type:
+          - Glue Job State Change
+        detail:
+          jobName:
+            - !Ref CopilotSilverJob
+          state:
+            - FAILED
+            - TIMEOUT
+            - STOPPED
+      Targets:
+        - Id: CopilotSilverAlarmTopic
+          Arn: !Ref AuditLogAlarmTopic
+
+  CopilotSilverQuarantineAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      AlarmName: !Sub "github-copilot-silver-quarantine-${Environment}"
+      AlarmDescription: Copilot bronze records were quarantined during silver normalization.
+      Namespace: GitHubDataLake/CopilotSilver
+      MetricName: QuarantinedRows
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotSilverScheduleDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      AlarmName: !Sub "github-copilot-silver-schedule-dlq-${Environment}"
+      AlarmDescription: The scheduler could not start the Copilot silver Glue job.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CopilotSilverScheduleDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
 Outputs:
   WebhookEndpoint:
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
@@ -2635,3 +2981,27 @@ Outputs:
     Condition: ShouldEnableCopilotCollection
     Value: !Ref CopilotCollectionDeadLetterQueue
     Description: "SQS queue containing failed Copilot collection tasks"
+  CopilotSilverGlueDatabaseName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotSilverGlueDatabase
+    Description: "Glue database containing typed Copilot billing and usage Iceberg tables"
+  CopilotSilverGlueJobName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotSilverJob
+    Description: "Scheduled Glue job for Copilot bronze-to-silver normalization and backfills"
+  CopilotSilverScheduleName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotSilverSchedule
+    Description: "Daily EventBridge Scheduler schedule for Copilot silver normalization"
+  CopilotSilverScheduleDeadLetterQueueUrl:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotSilverScheduleDeadLetterQueue
+    Description: "SQS queue containing failed attempts to start the Copilot silver Glue job"
+  CopilotSilverWarehouseLocation:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Sub "s3://${DataLakeS3Bucket}/silver/copilot/"
+    Description: "S3 warehouse root for Copilot silver Iceberg tables"
+  CopilotSilverQuarantineLocation:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Sub "s3://${DataLakeS3Bucket}/quarantine/copilot/"
+    Description: "S3 location for invalid Copilot bronze records"

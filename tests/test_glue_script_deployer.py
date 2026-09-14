@@ -28,7 +28,7 @@ class GlueScriptDeployerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             script_path = Path(directory) / "job.py"
             script_path.write_text("print('silver')\n", encoding="utf-8")
-            with patch.object(app, "SCRIPT_PATH", script_path):
+            with patch.dict(app.SCRIPT_PATHS, {"webhook_silver": script_path}):
                 app._publish_script("data-bucket", "glue-scripts/webhook-silver.py")
 
         request = self.s3.put_requests[0]
@@ -36,6 +36,27 @@ class GlueScriptDeployerTests(unittest.TestCase):
         self.assertEqual(request["Key"], "glue-scripts/webhook-silver.py")
         self.assertEqual(request["Body"], b"print('silver')\n")
         self.assertEqual(request["ServerSideEncryption"], "AES256")
+
+    def test_publishes_the_selected_copilot_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "job.py"
+            script_path.write_text("print('copilot')\n", encoding="utf-8")
+            with patch.dict(app.SCRIPT_PATHS, {"copilot_silver": script_path}):
+                app._publish_script(
+                    "data-bucket",
+                    "glue-scripts/copilot-silver.py",
+                    "copilot_silver",
+                )
+
+        self.assertEqual(
+            self.s3.put_requests[0]["Body"], b"print('copilot')\n"
+        )
+
+    def test_rejects_an_unknown_script_name(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported Glue script"):
+            app._publish_script(
+                "data-bucket", "glue-scripts/unknown.py", "unknown"
+            )
 
     def test_deletes_the_deployment_artifact(self):
         app._delete_script("data-bucket", "glue-scripts/webhook-silver.py")

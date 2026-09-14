@@ -24,6 +24,7 @@ EventBridge Scheduler -> coordinator Lambda -> encrypted SQS -> collector Lambda
            -> GitHub App installation token -> GitHub REST APIs
            -> S3 raw/copilot/ source responses and NDJSON
            -> S3 bronze/copilot/ stable NDJSON envelopes
+           -> scheduled Glue 5 Spark -> typed Copilot Iceberg silver tables
          failures -> DLQ
 
 S3 bronze and silver data -> AWS Glue Data Catalog -> Amazon Athena
@@ -106,9 +107,21 @@ The pipeline leverages a completely serverless architecture to process high-thro
     persisted.
   * Writes schema-tolerant envelopes under `bronze/copilot/` and exposes
     partition-projected `billing_usage` and `usage_reports` Glue tables.
-  * Defers silver normalization until representative production report schemas
-    have been observed. The complete source record remains in `raw_payload` so
-    silver can be rebuilt without loss.
+
+* **Copilot billing and usage silver layer**
+  * Runs a Glue 5.0 Spark job daily at 10:30 UTC, after the 08:30 UTC collector,
+    with independent bookmarks for billing and usage bronze inputs.
+  * Creates Iceberg v2 `billing_usage_daily`, `enterprise_usage_daily`,
+    `user_usage_daily`, `repository_usage_daily`, and
+    `user_team_memberships_daily` tables in
+    `github_copilot_silver_<environment>`.
+  * Selects the newest reconciliation snapshot per natural key and conditionally
+    merges it so an older collection cannot replace a newer one.
+  * Promotes stable scalar metrics and preserves evolving feature, IDE,
+    language, model, agent, and adoption-phase breakdowns as JSON columns.
+  * Routes malformed or keyless records to `quarantined_records` under
+    `quarantine/copilot/` and publishes run counts to
+    `GitHubDataLake/CopilotSilver`.
 
 * **Recovery and observability**
   * Provides a manually invoked replay Lambda for prefix-based backfills or
@@ -392,6 +405,9 @@ customer-managed KMS key, extend `CopilotCollectorRole` with `kms:Decrypt` for
 that key and permit the role in the key policy. Rotate the private key by
 updating the secret; no stack update is required.
 
+Store `private_key` as the decoded multiline PEM, including its `BEGIN` and
+`END` lines. Do not store a base64 encoding of the PEM.
+
 Deploy with `sam deploy --guided`, set `EnableCopilotCollection` to `true`, and
 provide the complete secret ARN for `CopilotGitHubAppSecretArn`. The template
 rejects an enabled deployment that retains the disabled sentinel ARN. The
@@ -411,6 +427,24 @@ TABLE`. Always filter `year`, `month`, `day`, and `report_type`. Because recent
 dates are collected repeatedly, select the greatest `collection_date` for each
 `report_day` and `report_type` before aggregating. See
 [sample-athena-queries.md](./sample-athena-queries.md).
+
+The scheduled silver job runs at 10:30 UTC. Query these Iceberg tables in
+`github_copilot_silver_dev` directly on `report_day`; hidden partitioning means
+there are no Hive partition columns to repair:
+
+- `billing_usage_daily`: one row per billing report, day, scope, product, SKU,
+  model, unit type, and cost center.
+- `enterprise_usage_daily`: one enterprise aggregate per day.
+- `user_usage_daily`: one user per day, including adoption phase and activity.
+- `repository_usage_daily`: one active repository per day with pull-request
+  metrics.
+- `user_team_memberships_daily`: one user-team membership per day. GitHub omits
+  teams with fewer than five seated Copilot users, so this table can be empty.
+- `quarantined_records`: validation failures with source lineage.
+
+Nested dimensional breakdowns remain JSON in silver because GitHub evolves
+those arrays independently. Stable top-level counters, identities, billing
+amounts, CLI/App counters, adoption fields, and pull-request metrics are typed.
 
 Invoke the coordinator directly for a bounded backfill. Each source window is
 limited to 31 days, so split longer billing history into multiple invocations:
@@ -434,11 +468,36 @@ aws lambda invoke \
   /tmp/copilot-collection.json
 ```
 
+After the bronze backfill completes, run the same calendar range through the
+silver job. Bounded runs require bookmarks to be disabled and do not advance
+the scheduled job's incremental state:
+
+```bash
+export COPILOT_SILVER_JOB="$(aws cloudformation describe-stacks \
+  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --query 'Stacks[0].Outputs[?OutputKey==`CopilotSilverGlueJobName`].OutputValue | [0]' \
+  --output text)"
+
+aws glue start-job-run \
+  --job-name "$COPILOT_SILVER_JOB" \
+  --arguments '{
+    "--job-bookmark-option":"job-bookmark-disable",
+    "--start_date":"2026-09-01",
+    "--end_date":"2026-09-13"
+  }'
+```
+
 Monitor the coordinator and collector function outputs, queue age, collector
 errors, and `CopilotCollectionDeadLetterQueueUrl`. Logs are retained for 30
 days and contain identifiers and counts, not tokens, private keys, signed URLs,
 or report bodies. Restrict Athena access to `raw_payload` and user-level usage
 records because they can contain identifiable employee activity.
+
+Also monitor `CopilotSilverGlueJobName`,
+`CopilotSilverScheduleDeadLetterQueueUrl`, and the shared alarm topic. Restrict
+general analysts to aggregate and repository tables; user-level usage, team
+membership, raw payload, and quarantine data require a narrower data-access
+role.
 
 At the default cadence, request, SQS, Lambda, and S3 charges are generally low;
 report size and Athena bytes scanned are the main variable costs. Secrets
@@ -446,6 +505,10 @@ Manager adds one secret charge, and the two metrics across six report types
 create 12 custom CloudWatch metric time series per environment. Review current
 regional pricing and add S3 lifecycle rules only after choosing raw and bronze
 retention requirements.
+
+The daily Glue 5.0 job uses two G.1X workers. At small volumes, Glue's minimum
+billed run duration is likely the dominant incremental silver cost; review job
+duration after several runs before increasing workers or schedule frequency.
 
 ### 9. Next Steps
 

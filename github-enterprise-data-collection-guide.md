@@ -403,10 +403,20 @@ pattern with GitHub App installation authentication:
 - Glue partition projection exposes `billing_usage` and `usage_reports` in
 	`github_copilot_bronze_<environment>` without crawlers or partition repair.
 
-Silver is deliberately deferred until representative report files have been
-collected. The usage API is evolving and report families have different grains;
-prematurely flattening every metric would create brittle schemas. Each bronze
-row therefore exposes stable lineage and identity fields while retaining the
-complete source record as `raw_payload`. A future silver job should select the
-latest successful collection for each report day and type, then use the
-report-specific upsert keys listed above.
+The implemented Glue 5.0 silver job selects the latest collection in each input
+batch and conditionally merges by the report-specific keys above. It creates
+typed daily billing, enterprise, user, repository, and user-team Iceberg tables
+in `github_copilot_silver_<environment>`. Collection date and time remain on
+every row so a replay from an older bronze snapshot cannot replace newer data.
+
+Stable identities, scalar counters, billing decimals, adoption fields, CLI and
+Copilot App counters, and pull-request metrics are promoted. Evolving nested
+breakdowns by feature, IDE, language, model, third-party agent, comment type,
+and aggregate adoption phase remain JSON strings with the complete source
+payload. Records missing a required report date or natural-key identity are
+written to `quarantined_records` with S3 lineage instead of being discarded.
+
+The daily 10:30 UTC schedule follows the 08:30 UTC collector. Calendar
+backfills accept up to 366 days per run only with Glue bookmarks disabled. The
+user-team table can legitimately be empty because GitHub excludes teams with
+fewer than five seated Copilot users from that report.
