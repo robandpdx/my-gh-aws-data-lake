@@ -1,8 +1,9 @@
 # GitHub Webhook and Audit Log Data Lake on AWS
 
-This SAM application ingests GitHub webhooks and GitHub Enterprise Cloud audit
-logs, retains the original audit gzip objects, converts both sources to Apache
-Parquet, and catalogs them for Amazon Athena.
+This SAM application ingests GitHub webhooks, GitHub Enterprise Cloud audit
+logs, and optional GitHub Copilot billing and usage reports. It retains
+source-faithful raw data, produces queryable bronze datasets, materializes
+webhook silver tables, and catalogs the analytical layers for Amazon Athena.
 
 ---
 
@@ -19,7 +20,13 @@ GitHub audit OIDC -> versioned raw S3 -> EventBridge -> encrypted SQS
                  -> S3 bronze/audit-logs/ Parquet
              failures -> DLQ or quarantine metadata
 
-S3 Parquet -> AWS Glue Data Catalog -> Amazon Athena
+EventBridge Scheduler -> coordinator Lambda -> encrypted SQS -> collector Lambda
+           -> GitHub App installation token -> GitHub REST APIs
+           -> S3 raw/copilot/ source responses and NDJSON
+           -> S3 bronze/copilot/ stable NDJSON envelopes
+         failures -> DLQ
+
+S3 bronze and silver data -> AWS Glue Data Catalog -> Amazon Athena
 ```
 
 ---
@@ -87,6 +94,22 @@ The pipeline leverages a completely serverless architecture to process high-thro
   * Converts normalized JSON to Snappy-compressed Parquet under
     `bronze/audit-logs/year=YYYY/month=MM/day=DD/hour=HH/`.
 
+* **Copilot billing and usage bronze collection**
+  * Is disabled by default and uses an enterprise-installed GitHub App instead
+    of a long-lived personal access token.
+  * Runs daily at 08:30 UTC, re-fetching billing dates `T-1` through `T-7` and
+    finalized usage dates `T-4` through `T-10` for late-data reconciliation.
+  * Fans out 42 deterministic report tasks through an encrypted SQS queue and
+    isolates repeatedly failing tasks in a 14-day dead-letter queue.
+  * Archives exact billing JSON and downloaded usage NDJSON under
+    `raw/copilot/`; signed download URLs are consumed immediately and are not
+    persisted.
+  * Writes schema-tolerant envelopes under `bronze/copilot/` and exposes
+    partition-projected `billing_usage` and `usage_reports` Glue tables.
+  * Defers silver normalization until representative production report schemas
+    have been observed. The complete source record remains in `raw_payload` so
+    silver can be rebuilt without loss.
+
 * **Recovery and observability**
   * Provides a manually invoked replay Lambda for prefix-based backfills or
     explicit object-version replay.
@@ -132,6 +155,10 @@ the account-global GitHub audit-log OIDC provider by default. Set
 already exist. The guided deployment stores the parameter values for later
 deployments. When an alarm email is supplied, confirm the Amazon SNS
 subscription message before expecting notifications.
+
+Copilot collection remains disabled unless `EnableCopilotCollection=true` and
+`CopilotGitHubAppSecretArn` names an existing Secrets Manager secret. See
+section 8 before enabling it.
 
 ### 2. Capture the Webhook Ingestion Endpoint
 Once the deployment status shows `CREATE_COMPLETE`:
@@ -270,7 +297,7 @@ Run the focused tests and SAM checks before deployment:
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 sam validate --lint
-sam build
+sam build --use-container
 ```
 
 At low audit volume, usage-based S3, SQS, Lambda, EventBridge, and Firehose
@@ -335,7 +362,92 @@ Use the `WebhookSilverGlueDatabaseName`, `WebhookSilverWarehouseLocation`,
 See [sample-athena-queries.md](./sample-athena-queries.md) for reconciliation
 and family-table examples.
 
-### 8. Next Steps
+### 8. Operate Copilot Billing and Usage Collection
+
+Before enabling collection:
+
+1. Set the enterprise **Copilot usage metrics** policy to **Enabled
+   everywhere**.
+2. Create a GitHub App owned by the enterprise with read access to the
+   **Enterprise billing** and **Enterprise Copilot metrics** permissions. No
+   repository permission is required by these report endpoints.
+3. Install the App on the enterprise and record its App ID and enterprise
+   installation ID. GitHub documents installation access tokens for every
+   endpoint used by this collector.
+4. In AWS Secrets Manager, create one JSON secret with the fields below. Enter
+   the actual values only in Secrets Manager, never in this repository,
+   CloudFormation parameters, or shell history.
+
+```json
+{
+  "app_id": "GITHUB_APP_ID",
+  "installation_id": "ENTERPRISE_INSTALLATION_ID",
+  "private_key": "GITHUB_APP_PRIVATE_KEY_PEM"
+}
+```
+
+Create the secret in the same AWS Region as the stack. The default Secrets
+Manager service key requires no additional permission. If the secret uses a
+customer-managed KMS key, extend `CopilotCollectorRole` with `kms:Decrypt` for
+that key and permit the role in the key policy. Rotate the private key by
+updating the secret; no stack update is required.
+
+Deploy with `sam deploy --guided`, set `EnableCopilotCollection` to `true`, and
+provide the complete secret ARN for `CopilotGitHubAppSecretArn`. The template
+rejects an enabled deployment that retains the disabled sentinel ARN. The
+schedule defaults to `cron(30 8 * * ? *)` in UTC and can be changed with
+`CopilotCollectionScheduleExpression`.
+
+Every normal run creates 14 billing tasks for AI credit and premium request
+reports and 28 usage tasks for enterprise, user, repository, and user-team
+reports. Object keys include both `report_day` and `collection_date`, while a
+retry of the same task overwrites the same key. This preserves late-arriving
+versions without producing retry duplicates.
+
+Query `github_copilot_bronze_dev.billing_usage` and
+`github_copilot_bronze_dev.usage_reports` using the stack's Athena workgroup.
+Both tables use partition projection, so they do not require `MSCK REPAIR
+TABLE`. Always filter `year`, `month`, `day`, and `report_type`. Because recent
+dates are collected repeatedly, select the greatest `collection_date` for each
+`report_day` and `report_type` before aggregating. See
+[sample-athena-queries.md](./sample-athena-queries.md).
+
+Invoke the coordinator directly for a bounded backfill. Each source window is
+limited to 31 days, so split longer billing history into multiple invocations:
+
+```bash
+export COPILOT_COORDINATOR="$(aws cloudformation describe-stacks \
+  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --query 'Stacks[0].Outputs[?OutputKey==`CopilotCollectionCoordinatorFunctionName`].OutputValue | [0]' \
+  --output text)"
+
+aws lambda invoke \
+  --function-name "$COPILOT_COORDINATOR" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{
+    "collection_date":"2026-09-14",
+    "billing_start_date":"2026-09-01",
+    "billing_end_date":"2026-09-13",
+    "usage_start_date":"2026-09-01",
+    "usage_end_date":"2026-09-10"
+  }' \
+  /tmp/copilot-collection.json
+```
+
+Monitor the coordinator and collector function outputs, queue age, collector
+errors, and `CopilotCollectionDeadLetterQueueUrl`. Logs are retained for 30
+days and contain identifiers and counts, not tokens, private keys, signed URLs,
+or report bodies. Restrict Athena access to `raw_payload` and user-level usage
+records because they can contain identifiable employee activity.
+
+At the default cadence, request, SQS, Lambda, and S3 charges are generally low;
+report size and Athena bytes scanned are the main variable costs. Secrets
+Manager adds one secret charge, and the two metrics across six report types
+create 12 custom CloudWatch metric time series per environment. Review current
+regional pricing and add S3 lifecycle rules only after choosing raw and bronze
+retention requirements.
+
+### 9. Next Steps
 
 See [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md)
 for the broader webhook analytics architecture.

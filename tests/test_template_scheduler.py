@@ -77,6 +77,36 @@ class SchedulerTemplateTests(unittest.TestCase):
         )
         self.assertIn("WebhookDeploymentV13", template)
 
+    def test_copilot_collection_is_opt_in_and_uses_github_app_secret(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("  EnableCopilotCollection:", template)
+        self.assertIn("  CopilotGitHubAppSecretArn:", template)
+        self.assertIn("Condition: ShouldEnableCopilotCollection", template)
+        self.assertIn("Action: secretsmanager:GetSecretValue", template)
+        self.assertIn("Resource: !Ref CopilotGitHubAppSecretArn", template)
+        self.assertNotIn("private_key:", template)
+
+    def test_copilot_collection_uses_daily_queue_fanout(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("Default: cron(30 8 * * ? *)", template)
+        self.assertIn("  CopilotCollectionQueue:", template)
+        self.assertIn("  CopilotCollectionDeadLetterQueue:", template)
+        self.assertIn("BatchSize: 1", template)
+        self.assertIn("MaximumConcurrency: !Ref CopilotCollectorReservedConcurrency", template)
+
+    def test_copilot_bronze_tables_use_partition_projection(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('Name: !Sub "github_copilot_bronze_${Environment}"', template)
+        self.assertIn("Name: billing_usage", template)
+        self.assertIn("Name: usage_reports", template)
+        self.assertIn("bronze/copilot/billing/year=${!year}", template)
+        self.assertIn("bronze/copilot/usage/year=${!year}", template)
+        self.assertIn("projection.year.range: '2024,2040'", template)
+        self.assertGreaterEqual(template.count("projection.enabled: 'true'"), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

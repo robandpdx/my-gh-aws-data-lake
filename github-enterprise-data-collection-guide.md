@@ -373,3 +373,40 @@ Use report-specific upsert keys:
 - User-team report: scope ID, user ID, team ID, and day.
 
 The daily reports should be the system of record for historical analytics. The rolling 28-day reports are best used as reconciliation checks rather than appended datasets, because consecutive reports contain heavily overlapping dates.
+
+### Implemented AWS Copilot bronze collector
+
+The SAM application implements the daily enterprise-scope billing and usage
+pattern with GitHub App installation authentication:
+
+- EventBridge Scheduler invokes one coordinator at 08:30 UTC. It emits two
+	billing report types for `T-1` through `T-7` and four usage report types for
+	`T-4` through `T-10`, for 42 tasks per normal run.
+- The App must be installed on the enterprise with read access to
+	**Enterprise billing** and **Enterprise Copilot metrics**. GitHub's endpoint
+	permission inventory explicitly supports installation access tokens for
+	these routes. The enterprise Copilot usage metrics policy must also be
+	enabled everywhere.
+- Secrets Manager holds only `app_id`, `installation_id`, and `private_key`.
+	The worker creates a short-lived App JWT and exchanges it for an installation
+	token on each SQS invocation. Neither credential is stored in S3 or logs.
+- Billing responses are archived exactly as JSON. Usage report links are
+	downloaded immediately; only a sanitized manifest and the source NDJSON are
+	archived, never the signed URLs.
+- Raw objects use
+	`raw/copilot/<source>/report_type=<type>/report_day=<date>/collection_date=<date>/`.
+	Stable NDJSON envelopes use
+	`bronze/copilot/<source>/year=<YYYY>/month=<MM>/day=<DD>/report_type=<type>/`.
+- Deterministic object names make SQS retries idempotent within one collection
+	date. Reconciled snapshots from later collection dates remain available so
+	late billing adjustments and finalized usage can be compared.
+- Glue partition projection exposes `billing_usage` and `usage_reports` in
+	`github_copilot_bronze_<environment>` without crawlers or partition repair.
+
+Silver is deliberately deferred until representative report files have been
+collected. The usage API is evolving and report families have different grains;
+prematurely flattening every metric would create brittle schemas. Each bronze
+row therefore exposes stable lineage and identity fields while retaining the
+complete source record as `raw_payload`. A future silver job should select the
+latest successful collection for each report day and type, then use the
+report-specific upsert keys listed above.

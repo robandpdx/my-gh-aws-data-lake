@@ -1,5 +1,83 @@
 # Sample Athena Queries
 
+## GitHub Copilot bronze
+
+Copilot partitions represent the GitHub report day. Recent report days have
+multiple reconciliation snapshots, so select the latest `collection_date`
+before aggregating. Partition projection means no `MSCK REPAIR TABLE` command
+is required.
+
+### Summarize latest Copilot billing snapshots
+
+```sql
+WITH scoped AS (
+  SELECT *
+  FROM github_copilot_bronze_dev.billing_usage
+  WHERE year = '2026'
+    AND month = '09'
+    AND day BETWEEN '01' AND '30'
+    AND report_type IN ('ai_credit', 'premium_request')
+),
+latest AS (
+  SELECT report_day, report_type, max(collection_date) AS collection_date
+  FROM scoped
+  GROUP BY report_day, report_type
+)
+SELECT
+  cast(scoped.report_day AS date) AS usage_day,
+  scoped.report_type,
+  scoped.organization_login,
+  scoped.product,
+  scoped.sku,
+  scoped.model,
+  sum(scoped.net_quantity) AS net_quantity,
+  sum(scoped.net_amount) AS net_amount
+FROM scoped
+JOIN latest
+  ON scoped.report_day = latest.report_day
+ AND scoped.report_type = latest.report_type
+ AND scoped.collection_date = latest.collection_date
+GROUP BY 1, 2, 3, 4, 5, 6
+ORDER BY usage_day DESC, net_amount DESC;
+```
+
+### Check latest Copilot usage report coverage
+
+This query reports source row counts rather than interpreting the evolving
+metric payload. Promote frequently used values from `raw_payload` only after
+their production types and null behavior have been verified.
+
+```sql
+WITH scoped AS (
+  SELECT *
+  FROM github_copilot_bronze_dev.usage_reports
+  WHERE year = '2026'
+    AND month = '09'
+    AND day BETWEEN '01' AND '30'
+    AND report_type IN ('enterprise', 'users', 'repositories', 'user_teams')
+),
+latest AS (
+  SELECT report_day, report_type, max(collection_date) AS collection_date
+  FROM scoped
+  GROUP BY report_day, report_type
+)
+SELECT
+  cast(scoped.report_day AS date) AS report_day,
+  scoped.report_type,
+  latest.collection_date,
+  count(*) AS source_rows,
+  count(DISTINCT scoped.user_id) AS users,
+  count(DISTINCT scoped.repository_id) AS repositories,
+  count(DISTINCT scoped.team_id) AS teams
+FROM scoped
+JOIN latest
+  ON scoped.report_day = latest.report_day
+ AND scoped.report_type = latest.report_type
+ AND scoped.collection_date = latest.collection_date
+GROUP BY 1, 2, 3
+ORDER BY report_day DESC, report_type;
+```
+
 ## GitHub webhook silver
 
 The `github_webhooks_silver_dev` tables are Apache Iceberg v2 tables. They use

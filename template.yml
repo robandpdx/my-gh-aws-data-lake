@@ -42,6 +42,41 @@ Parameters:
     MinValue: 2
     MaxValue: 100
     Description: Number of G.1X workers allocated to the webhook silver Glue job.
+  EnableCopilotCollection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable scheduled GitHub Copilot billing and usage collection.
+  CopilotGitHubAppSecretArn:
+    Type: String
+    Default: arn:aws:secretsmanager:us-east-1:000000000000:secret:disabled
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$'
+    ConstraintDescription: Enter a complete Secrets Manager secret ARN.
+    Description: Secrets Manager ARN containing app_id, installation_id, and private_key for an enterprise-installed GitHub App.
+  CopilotCollectionScheduleExpression:
+    Type: String
+    Default: cron(30 8 * * ? *)
+    Description: EventBridge schedule for daily Copilot collection task generation in UTC.
+  CopilotCollectorReservedConcurrency:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 20
+    Description: Reserved and maximum SQS concurrency for Copilot report workers.
+
+Rules:
+  CopilotSecretRequiredWhenEnabled:
+    RuleCondition:
+      Fn::Equals:
+        - Ref: EnableCopilotCollection
+        - 'true'
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: CopilotGitHubAppSecretArn
+                - arn:aws:secretsmanager:us-east-1:000000000000:secret:disabled
+        AssertDescription: CopilotGitHubAppSecretArn must reference an existing secret when Copilot collection is enabled.
 
 Conditions:
   ShouldCreateGitHubAuditLogOidcProvider:
@@ -53,6 +88,10 @@ Conditions:
       - Fn::Equals:
           - Ref: AuditLogAlarmEmail
           - ''
+  ShouldEnableCopilotCollection:
+    Fn::Equals:
+      - Ref: EnableCopilotCollection
+      - 'true'
 
 Resources:
   # 1. Amazon S3 Bucket for Data Lake Storage
@@ -1608,6 +1647,7 @@ Resources:
                 aws:SourceArn:
                   - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
                   - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-webhook-silver-*"
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-copilot-*"
                   - !Sub "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/github-webhook-silver-job-failure-${Environment}"
       Tags:
         - Key: Environment
@@ -1663,6 +1703,7 @@ Resources:
                 aws:SourceArn:
                   - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-audit-log-*"
                   - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-webhook-silver-*"
+                  - !Sub "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:github-copilot-*"
           - Sid: AllowWebhookSilverFailureEvents
             Effect: Allow
             Principal:
@@ -1901,6 +1942,594 @@ Resources:
         - Key: Project
           Value: github-data-lake
 
+  # 12. Daily GitHub Copilot billing and usage report collection
+  CopilotGlueDatabase:
+    Type: AWS::Glue::Database
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "github_copilot_bronze_${Environment}"
+        Description: Queryable bronze envelopes for GitHub Copilot billing and usage reports.
+
+  CopilotBillingUsageTable:
+    Type: AWS::Glue::Table
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref CopilotGlueDatabase
+      TableInput:
+        Name: billing_usage
+        Description: Daily GitHub Copilot AI credit and premium request billing records.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2024,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          projection.report_type.type: enum
+          projection.report_type.values: ai_credit,premium_request
+          storage.location.template: !Sub "s3://${DataLakeS3Bucket}/bronze/copilot/billing/year=${!year}/month=${!month}/day=${!day}/report_type=${!report_type}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/copilot/billing/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'false'
+              ignore.malformed.json: 'false'
+          Columns:
+            - Name: collection_id
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: collected_at
+              Type: string
+            - Name: enterprise_slug
+              Type: string
+            - Name: report_day
+              Type: string
+            - Name: organization_login
+              Type: string
+            - Name: user_login
+              Type: string
+            - Name: product
+              Type: string
+            - Name: sku
+              Type: string
+            - Name: model
+              Type: string
+            - Name: unit_type
+              Type: string
+            - Name: price_per_unit
+              Type: double
+            - Name: gross_quantity
+              Type: double
+            - Name: gross_amount
+              Type: double
+            - Name: discount_quantity
+              Type: double
+            - Name: discount_amount
+              Type: double
+            - Name: net_quantity
+              Type: double
+            - Name: net_amount
+              Type: double
+            - Name: cost_center_id
+              Type: string
+            - Name: cost_center_name
+              Type: string
+            - Name: raw_payload
+              Type: string
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: report_type
+            Type: string
+
+  CopilotUsageReportsTable:
+    Type: AWS::Glue::Table
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref CopilotGlueDatabase
+      TableInput:
+        Name: usage_reports
+        Description: Schema-tolerant envelopes for daily GitHub Copilot usage metric records.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2025,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          projection.report_type.type: enum
+          projection.report_type.values: enterprise,users,repositories,user_teams
+          storage.location.template: !Sub "s3://${DataLakeS3Bucket}/bronze/copilot/usage/year=${!year}/month=${!month}/day=${!day}/report_type=${!report_type}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/copilot/usage/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'false'
+              ignore.malformed.json: 'false'
+          Columns:
+            - Name: collection_id
+              Type: string
+            - Name: collection_date
+              Type: string
+            - Name: collected_at
+              Type: string
+            - Name: enterprise_slug
+              Type: string
+            - Name: report_day
+              Type: string
+            - Name: record_index
+              Type: bigint
+            - Name: record_id
+              Type: string
+            - Name: user_id
+              Type: bigint
+            - Name: user_login
+              Type: string
+            - Name: organization_id
+              Type: bigint
+            - Name: organization_login
+              Type: string
+            - Name: repository_id
+              Type: bigint
+            - Name: repository_full_name
+              Type: string
+            - Name: team_id
+              Type: bigint
+            - Name: team_slug
+              Type: string
+            - Name: raw_payload
+              Type: string
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+          - Name: report_type
+            Type: string
+
+  CopilotCollectionDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      QueueName: !Sub "github-copilot-collection-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionQueue:
+    Type: AWS::SQS::Queue
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      QueueName: !Sub "github-copilot-collection-${Environment}"
+      MessageRetentionPeriod: 1209600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 5400
+      SqsManagedSseEnabled: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CopilotCollectionDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionCoordinatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/github-copilot-collection-coordinator-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionCoordinatorRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Description: Fans out bounded daily Copilot billing and usage collection tasks.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CopilotCollectionCoordinatorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: EnqueueCollectionTasks
+                Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CopilotCollectionQueue.Arn
+              - Sid: WriteCoordinatorLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CopilotCollectionCoordinatorLogGroup.Arn
+              - Sid: PublishXRayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionCoordinatorFunction:
+    Type: AWS::Serverless::Function
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      FunctionName: !Sub "github-copilot-collection-coordinator-${Environment}"
+      Description: Creates daily reconciliation tasks for Copilot billing and usage reports.
+      CodeUri: src/copilot_collection_coordinator/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 128
+      Timeout: 60
+      Tracing: Active
+      Role: !GetAtt CopilotCollectionCoordinatorRole.Arn
+      Environment:
+        Variables:
+          COLLECTION_QUEUE_URL: !Ref CopilotCollectionQueue
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+
+  CopilotCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/github-copilot-collector-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectorRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Description: Collects Copilot reports using a short-lived GitHub App installation token.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CopilotCollectorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ConsumeCollectionTasks
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt CopilotCollectionQueue.Arn
+              - Sid: ReadGitHubAppCredentials
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref CopilotGitHubAppSecretArn
+              - Sid: InspectDataLakeBucket
+                Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucketMultipartUploads
+                Resource: !GetAtt DataLakeS3Bucket.Arn
+              - Sid: WriteCopilotObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${DataLakeS3Bucket.Arn}/raw/copilot/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/bronze/copilot/*"
+              - Sid: WriteCollectorLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CopilotCollectorLogGroup.Arn
+              - Sid: PublishCopilotMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: GitHubDataLake/Copilot
+              - Sid: PublishXRayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectorFunction:
+    Type: AWS::Serverless::Function
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      FunctionName: !Sub "github-copilot-collector-${Environment}"
+      Description: Downloads GitHub Copilot billing and usage reports into raw and bronze S3 prefixes.
+      CodeUri: src/copilot_collector/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 1024
+      EphemeralStorage:
+        Size: 2048
+      Timeout: 900
+      ReservedConcurrentExecutions: !Ref CopilotCollectorReservedConcurrency
+      Tracing: Active
+      Role: !GetAtt CopilotCollectorRole.Arn
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeS3Bucket
+          ENVIRONMENT: !Ref Environment
+          GITHUB_APP_SECRET_ARN: !Ref CopilotGitHubAppSecretArn
+          GITHUB_ENTERPRISE_SLUG: !Ref GitHubEnterpriseSlug
+          GITHUB_API_VERSION: '2026-03-10'
+          MAX_REPORT_BYTES: '1073741824'
+      Events:
+        CollectionQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CopilotCollectionQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: !Ref CopilotCollectorReservedConcurrency
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+        DataLayer: bronze
+
+  CopilotCollectionSchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Description: Invokes the daily Copilot collection coordinator.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default"
+      Policies:
+        - PolicyName: InvokeCopilotCollectionCoordinator
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt CopilotCollectionCoordinatorFunction.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt CopilotCollectionDeadLetterQueue.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      Name: !Sub "github-copilot-collection-${Environment}"
+      Description: Fans out daily Copilot billing and finalized usage report collection.
+      State: ENABLED
+      ScheduleExpression: !Ref CopilotCollectionScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt CopilotCollectionCoordinatorFunction.Arn
+        RoleArn: !GetAtt CopilotCollectionSchedulerRole.Arn
+        Input: '{}'
+        DeadLetterConfig:
+          Arn: !GetAtt CopilotCollectionDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+
+  CopilotCollectionQueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      AlarmName: !Sub "github-copilot-collection-queue-age-${Environment}"
+      AlarmDescription: Copilot report collection tasks have waited more than one hour.
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CopilotCollectionQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 3600
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      AlarmName: !Sub "github-copilot-collection-dlq-${Environment}"
+      AlarmDescription: One or more Copilot report tasks require investigation or redrive.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt CopilotCollectionDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectionCoordinatorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      AlarmName: !Sub "github-copilot-collection-coordinator-errors-${Environment}"
+      AlarmDescription: Copilot collection coordinator returned an invocation error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CopilotCollectionCoordinatorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  CopilotCollectorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableCopilotCollection
+    Properties:
+      AlarmName: !Sub "github-copilot-collector-errors-${Environment}"
+      AlarmDescription: Copilot collector returned an invocation error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CopilotCollectorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
 Outputs:
   WebhookEndpoint:
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
@@ -1974,3 +2603,35 @@ Outputs:
   WebhookSilverQuarantineLocation:
     Value: !Sub "s3://${DataLakeS3Bucket}/quarantine/webhooks/"
     Description: "S3 location for the webhook silver quarantine Iceberg table"
+  CopilotGlueDatabaseName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotGlueDatabase
+    Description: "Glue database containing queryable Copilot bronze tables"
+  CopilotBillingUsageTableName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotBillingUsageTable
+    Description: "Athena table for Copilot AI credit and premium request billing records"
+  CopilotUsageReportsTableName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotUsageReportsTable
+    Description: "Athena table for schema-tolerant Copilot usage metric envelopes"
+  CopilotCollectionCoordinatorFunctionName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotCollectionCoordinatorFunction
+    Description: "Lambda function that creates daily Copilot collection tasks"
+  CopilotCollectorFunctionName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotCollectorFunction
+    Description: "Lambda function that collects individual Copilot reports"
+  CopilotCollectionScheduleName:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotCollectionSchedule
+    Description: "Daily EventBridge Scheduler schedule for Copilot collection"
+  CopilotCollectionQueueUrl:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotCollectionQueue
+    Description: "SQS queue containing Copilot billing and usage collection tasks"
+  CopilotCollectionDeadLetterQueueUrl:
+    Condition: ShouldEnableCopilotCollection
+    Value: !Ref CopilotCollectionDeadLetterQueue
+    Description: "SQS queue containing failed Copilot collection tasks"

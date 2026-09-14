@@ -116,21 +116,34 @@ Use separate Glue databases to make lifecycle, permissions, and table intent obv
 - `github_webhooks_bronze_dev`
 - `github_webhooks_silver_dev`
 - `github_webhooks_gold_dev`
+- `github_copilot_bronze_dev`
 
 The deployed bronze ingestion table is `github_webhooks_bronze_dev.events`.
+The optional Copilot collector exposes `billing_usage` and `usage_reports` in
+`github_copilot_bronze_dev`.
 
 Recommended S3 prefixes in the existing environment bucket:
 
 ```text
 s3://github-data-lake-dev-953721827634/
 ├── raw/
-│   └── webhooks/                     # optional exact request bodies
-│       └── ingest_date=YYYY-MM-DD/hour=HH/
+│   ├── webhooks/                     # optional exact request bodies
+│   │   └── ingest_date=YYYY-MM-DD/hour=HH/
+│   └── copilot/
+│       ├── billing/                  # exact daily API responses
+│       │   └── report_type=TYPE/report_day=YYYY-MM-DD/collection_date=YYYY-MM-DD/
+│       └── usage/                    # sanitized manifest plus downloaded NDJSON parts
+│           └── report_type=TYPE/report_day=YYYY-MM-DD/collection_date=YYYY-MM-DD/
 ├── bronze/
 │   ├── webhooks/                     # webhook Parquet
 │   │   └── year=YYYY/month=MM/day=DD/
-│   └── audit-logs/                   # normalized audit-log Parquet
-│       └── year=YYYY/month=MM/day=DD/hour=HH/
+│   ├── audit-logs/                   # normalized audit-log Parquet
+│   │   └── year=YYYY/month=MM/day=DD/hour=HH/
+│   └── copilot/
+│       ├── billing/                  # stable billing NDJSON envelopes
+│       │   └── year=YYYY/month=MM/day=DD/report_type=TYPE/
+│       └── usage/                    # stable usage NDJSON envelopes
+│           └── year=YYYY/month=MM/day=DD/report_type=TYPE/
 ├── silver/
 │   └── webhooks/
 │       ├── events/
@@ -160,6 +173,13 @@ Source-specific data follows `<zone>/<source>/`. Cross-source datasets use
 their analytical dataset name beneath `silver/` or `gold/`, and operational
 artifacts retain purpose-specific prefixes such as `athena-results/` and
 `glue-scripts/`.
+
+The Copilot year/month/day partitions represent the GitHub report day, while
+`collection_date` identifies a particular reconciliation snapshot. Keep raw
+and bronze snapshots immutable across collection dates; use the latest snapshot
+per report day in analytical queries. Promote fields to silver only after real
+enterprise, user, repository, and user-team payloads establish stable types and
+keys.
 
 Use distinct KMS keys or key policies where raw payload sensitivity differs from aggregates. Do not point an Iceberg table at a prefix shared with non-Iceberg files.
 
