@@ -171,6 +171,47 @@ class CopilotCollectorTests(unittest.TestCase):
         self.assertEqual(record["user_id"], 42)
         self.assertEqual(record["user_login"], "octocat")
 
+    def test_treats_empty_json_string_usage_response_as_no_data(self):
+        task = {
+            "source": "usage",
+            "report_type": "users",
+            "report_day": "2026-09-01",
+            "collection_date": "2026-09-14",
+        }
+        with patch.dict(app.os.environ, self.environment, clear=True), patch.object(
+            app,
+            "_github_request",
+            return_value=(200, {}, b'""'),
+        ):
+            count = app.collect_task(task, "installation-token", "2026-09-14T08:30:00Z")
+
+        self.assertEqual(count, 0)
+        manifest_key = (
+            "raw/copilot/usage/report_type=users/report_day=2026-09-01/"
+            "collection_date=2026-09-14/manifest.json"
+        )
+        manifest = json.loads(self.s3.objects[manifest_key])
+        self.assertTrue(manifest["no_data"])
+        bronze_key = (
+            "bronze/copilot/usage/year=2026/month=09/day=01/"
+            "report_type=users/collection-2026-09-14.ndjson"
+        )
+        self.assertEqual(self.s3.objects[bronze_key], b"")
+
+    def test_rejects_invalid_usage_response_shape(self):
+        task = {
+            "source": "usage",
+            "report_type": "users",
+            "report_day": "2026-09-01",
+            "collection_date": "2026-09-14",
+        }
+        with patch.dict(app.os.environ, self.environment, clear=True), patch.object(
+            app,
+            "_github_request",
+            return_value=(200, {}, b'[]'),
+        ), self.assertRaisesRegex(ValueError, "must be a JSON object"):
+            app.collect_task(task, "installation-token", "2026-09-14T08:30:00Z")
+
     def test_returns_only_failed_sqs_messages(self):
         secret = FakeSecretsManager(
             {

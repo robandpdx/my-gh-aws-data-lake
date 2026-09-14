@@ -387,18 +387,29 @@ def _collect_usage(task, token, s3_client, bucket, collected_at):
     status, _, body = _github_request(
         f"{endpoint}?{urlencode({'day': task['report_day']})}", token
     )
-    if status == 204:
+    no_data = status == 204
+    if no_data:
         response = {"download_links": [], "report_day": task["report_day"]}
     elif status == 200:
         response = json.loads(body)
+        if response == "":
+            no_data = True
+            response = {"download_links": [], "report_day": task["report_day"]}
+        elif not isinstance(response, dict):
+            raise ValueError("GitHub usage report response must be a JSON object")
     else:
         raise RuntimeError(f"GitHub usage report returned HTTP {status}")
 
     download_links = response.get("download_links", [])
+    if not isinstance(download_links, list) or not all(
+        isinstance(download_link, str) for download_link in download_links
+    ):
+        raise ValueError("GitHub usage report download_links must be a string array")
     manifest = {
         "collection_id": _collection_id(task),
         "collected_at": collected_at,
         "enterprise_slug": os.environ["GITHUB_ENTERPRISE_SLUG"],
+        "no_data": no_data,
         "report_day": task["report_day"],
         "report_type": task["report_type"],
         "part_count": len(download_links),
