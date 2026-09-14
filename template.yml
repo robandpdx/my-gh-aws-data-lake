@@ -56,12 +56,12 @@ Conditions:
 
 Resources:
   # 1. Amazon S3 Bucket for Data Lake Storage
-  WebhookS3Bucket:
+  DataLakeS3Bucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Sub "github-webhooks-parquet-${Environment}-${AWS::AccountId}"
+      BucketName: !Sub "github-data-lake-${Environment}-${AWS::AccountId}"
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -82,10 +82,10 @@ Resources:
         - Key: Project
           Value: github-data-lake
 
-  WebhookS3BucketPolicy:
+  DataLakeS3BucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
-      Bucket: !Ref WebhookS3Bucket
+      Bucket: !Ref DataLakeS3Bucket
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -94,36 +94,36 @@ Resources:
             Principal: '*'
             Action: s3:*
             Resource:
-              - !GetAtt WebhookS3Bucket.Arn
-              - !Sub "${WebhookS3Bucket.Arn}/*"
+              - !GetAtt DataLakeS3Bucket.Arn
+              - !Sub "${DataLakeS3Bucket.Arn}/*"
             Condition:
               Bool:
                 aws:SecureTransport: 'false'
 
   # 2. AWS Glue Database
-  GlueDatabase:
+  WebhookBronzeGlueDatabase:
     Type: AWS::Glue::Database
     Properties:
       CatalogId: !Ref AWS::AccountId
       DatabaseInput:
-        Name: !Sub "github_webhooks_${Environment}"
-        Description: "Database for GitHub webhooks ingested as Parquet"
+        Name: !Sub "github_webhooks_bronze_${Environment}"
+        Description: "Bronze database for GitHub webhooks ingested as Parquet"
 
   # 3. AWS Glue Table (Defines Parquet schema with core metadata and flexible payload)
-  GlueTable:
+  WebhookBronzeGlueTable:
     Type: AWS::Glue::Table
     Properties:
       CatalogId: !Ref AWS::AccountId
-      DatabaseName: !Ref GlueDatabase
+      DatabaseName: !Ref WebhookBronzeGlueDatabase
       TableInput:
         Name: events
-        Description: "Table storing GitHub webhook events"
+        Description: "Bronze table storing GitHub webhook events"
         TableType: EXTERNAL_TABLE
         Parameters:
           classification: parquet
           has_encrypted_data: 'false'
         StorageDescriptor:
-          Location: !Sub "s3://${WebhookS3Bucket}/webhooks/"
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/webhooks/"
           InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
           Compressed: true
@@ -203,8 +203,8 @@ Resources:
                   - s3:ListBucketMultipartUploads
                   - s3:PutObject
                 Resource:
-                  - !GetAtt WebhookS3Bucket.Arn
-                  - !Sub "${WebhookS3Bucket.Arn}/*"
+                  - !GetAtt DataLakeS3Bucket.Arn
+                  - !Sub "${DataLakeS3Bucket.Arn}/*"
               - Effect: Allow
                 Action:
                   - glue:GetDatabase
@@ -213,8 +213,8 @@ Resources:
                   - glue:GetTableVersions
                 Resource:
                   - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${GlueDatabase}"
-                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${GlueDatabase}/events"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${WebhookBronzeGlueDatabase}"
+                  - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${WebhookBronzeGlueDatabase}/events"
               - Effect: Allow
                 Action:
                   - logs:PutLogEvents
@@ -234,9 +234,9 @@ Resources:
           Value: !Ref owner
       ExtendedS3DestinationConfiguration:
         RoleARN: !GetAtt FirehoseRole.Arn
-        BucketARN: !GetAtt WebhookS3Bucket.Arn
-        Prefix: "webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
-        ErrorOutputPrefix: "webhooks-errors/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/!{firehose:error-output-type}/"
+        BucketARN: !GetAtt DataLakeS3Bucket.Arn
+        Prefix: "bronze/webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/"
+        ErrorOutputPrefix: "errors/webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/!{firehose:error-output-type}/"
         BufferingHints:
           IntervalInSeconds: 300
           SizeInMBs: 64
@@ -254,7 +254,7 @@ Resources:
             Serializer:
               ParquetSerDe: {}
           SchemaConfiguration:
-            DatabaseName: !Ref GlueDatabase
+            DatabaseName: !Ref WebhookBronzeGlueDatabase
             TableName: events
             RoleARN: !GetAtt FirehoseRole.Arn
             Region: !Ref AWS::Region
@@ -423,7 +423,7 @@ Resources:
         EnforceWorkGroupConfiguration: true
         PublishCloudWatchMetricsEnabled: true
         ResultConfiguration:
-          OutputLocation: !Sub "s3://${WebhookS3Bucket}/athena-results/"
+          OutputLocation: !Sub "s3://${DataLakeS3Bucket}/athena-results/"
           ExpectedBucketOwner: !Ref AWS::AccountId
           EncryptionConfiguration:
             EncryptionOption: SSE_S3
@@ -474,7 +474,7 @@ Resources:
                 Action:
                   - s3:DeleteObject
                   - s3:PutObject
-                Resource: !Sub "${WebhookS3Bucket.Arn}/glue-scripts/webhook-silver.py"
+                Resource: !Sub "${DataLakeS3Bucket.Arn}/glue-scripts/webhook-silver.py"
               - Sid: WriteFunctionLogs
                 Effect: Allow
                 Action:
@@ -510,10 +510,10 @@ Resources:
 
   WebhookSilverScript:
     Type: Custom::GlueScript
-    DependsOn: WebhookS3BucketPolicy
+    DependsOn: DataLakeS3BucketPolicy
     Properties:
       ServiceToken: !GetAtt GlueScriptDeployerFunction.Arn
-      BucketName: !Ref WebhookS3Bucket
+      BucketName: !Ref DataLakeS3Bucket
       ScriptKey: glue-scripts/webhook-silver.py
       PublisherVersion: !Ref GlueScriptDeployerFunction.Version
 
@@ -538,18 +538,18 @@ Resources:
                 Action:
                   - s3:GetBucketLocation
                   - s3:ListBucketMultipartUploads
-                Resource: !GetAtt WebhookS3Bucket.Arn
+                Resource: !GetAtt DataLakeS3Bucket.Arn
               - Sid: ListDataLakePrefixes
                 Effect: Allow
                 Action: s3:ListBucket
-                Resource: !GetAtt WebhookS3Bucket.Arn
+                Resource: !GetAtt DataLakeS3Bucket.Arn
                 Condition:
                   StringLike:
                     s3:prefix:
-                      - webhooks
-                      - webhooks/*
-                      - silver
-                      - silver/*
+                      - bronze/webhooks
+                      - bronze/webhooks/*
+                      - silver/webhooks
+                      - silver/webhooks/*
                       - quarantine/webhooks
                       - quarantine/webhooks/*
                       - glue-scripts/webhook-silver.py
@@ -561,8 +561,8 @@ Resources:
                   - s3:GetObject
                   - s3:GetObjectVersion
                 Resource:
-                  - !Sub "${WebhookS3Bucket.Arn}/webhooks/*"
-                  - !Sub "${WebhookS3Bucket.Arn}/glue-scripts/webhook-silver.py"
+                  - !Sub "${DataLakeS3Bucket.Arn}/bronze/webhooks/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/glue-scripts/webhook-silver.py"
               - Sid: ManageSilverQuarantineAndTemporaryObjects
                 Effect: Allow
                 Action:
@@ -572,9 +572,9 @@ Resources:
                   - s3:ListMultipartUploadParts
                   - s3:PutObject
                 Resource:
-                  - !Sub "${WebhookS3Bucket.Arn}/silver/*"
-                  - !Sub "${WebhookS3Bucket.Arn}/quarantine/webhooks/*"
-                  - !Sub "${WebhookS3Bucket.Arn}/glue-temp/webhook-silver/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/silver/webhooks/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/quarantine/webhooks/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/glue-temp/webhook-silver/*"
               - Sid: ManageSilverCatalog
                 Effect: Allow
                 Action:
@@ -630,7 +630,7 @@ Resources:
       Command:
         Name: glueetl
         PythonVersion: '3'
-        ScriptLocation: !Sub "s3://${WebhookS3Bucket}/glue-scripts/webhook-silver.py"
+        ScriptLocation: !Sub "s3://${DataLakeS3Bucket}/glue-scripts/webhook-silver.py"
       DefaultArguments:
         '--job-language': python
         '--datalake-formats': iceberg
@@ -638,16 +638,16 @@ Resources:
         '--enable-continuous-cloudwatch-log': 'true'
         '--enable-metrics': 'true'
         '--enable-observability-metrics': 'true'
-        '--TempDir': !Sub "s3://${WebhookS3Bucket}/glue-temp/webhook-silver/"
+        '--TempDir': !Sub "s3://${DataLakeS3Bucket}/glue-temp/webhook-silver/"
         '--environment': !Ref Environment
-        '--bronze_path': !Sub "s3://${WebhookS3Bucket}/webhooks/"
+        '--bronze_path': !Sub "s3://${DataLakeS3Bucket}/bronze/webhooks/"
         '--silver_database': !Ref WebhookSilverGlueDatabase
-        '--warehouse_path': !Sub "s3://${WebhookS3Bucket}/silver/"
-        '--quarantine_path': !Sub "s3://${WebhookS3Bucket}/quarantine/webhooks/"
+        '--warehouse_path': !Sub "s3://${DataLakeS3Bucket}/silver/webhooks/"
+        '--quarantine_path': !Sub "s3://${DataLakeS3Bucket}/quarantine/webhooks/"
         '--conf': !Sub >-
           spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
           --conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog
-          --conf spark.sql.catalog.glue_catalog.warehouse=s3://${WebhookS3Bucket}/silver/
+          --conf spark.sql.catalog.glue_catalog.warehouse=s3://${DataLakeS3Bucket}/silver/webhooks/
           --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog
           --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO
           --conf spark.sql.session.timeZone=UTC
@@ -1047,9 +1047,9 @@ Resources:
           projection.hour.type: integer
           projection.hour.range: '0,23'
           projection.hour.digits: '2'
-          storage.location.template: !Sub "s3://${WebhookS3Bucket}/audit-logs/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/"
+          storage.location.template: !Sub "s3://${DataLakeS3Bucket}/bronze/audit-logs/year=${!year}/month=${!month}/day=${!day}/hour=${!hour}/"
         StorageDescriptor:
-          Location: !Sub "s3://${WebhookS3Bucket}/audit-logs/"
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/audit-logs/"
           InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
           OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
           Compressed: true
@@ -1203,16 +1203,16 @@ Resources:
                 Action:
                   - s3:GetBucketLocation
                   - s3:ListBucketMultipartUploads
-                Resource: !GetAtt WebhookS3Bucket.Arn
+                Resource: !GetAtt DataLakeS3Bucket.Arn
               - Sid: ListDestinationPrefixes
                 Effect: Allow
                 Action: s3:ListBucket
-                Resource: !GetAtt WebhookS3Bucket.Arn
+                Resource: !GetAtt DataLakeS3Bucket.Arn
                 Condition:
                   StringLike:
                     s3:prefix:
-                      - audit-logs/*
-                      - audit-logs-errors/*
+                      - bronze/audit-logs/*
+                      - errors/audit-logs/*
               - Sid: WriteAuditLogObjects
                 Effect: Allow
                 Action:
@@ -1220,8 +1220,8 @@ Resources:
                   - s3:GetObject
                   - s3:PutObject
                 Resource:
-                  - !Sub "${WebhookS3Bucket.Arn}/audit-logs/*"
-                  - !Sub "${WebhookS3Bucket.Arn}/audit-logs-errors/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/bronze/audit-logs/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/errors/audit-logs/*"
               - Sid: ReadAuditLogSchema
                 Effect: Allow
                 Action:
@@ -1254,9 +1254,9 @@ Resources:
         KeyType: AWS_OWNED_CMK
       ExtendedS3DestinationConfiguration:
         RoleARN: !GetAtt AuditLogFirehoseRole.Arn
-        BucketARN: !GetAtt WebhookS3Bucket.Arn
-        Prefix: "audit-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/"
-        ErrorOutputPrefix: "audit-logs-errors/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/!{firehose:error-output-type}/"
+        BucketARN: !GetAtt DataLakeS3Bucket.Arn
+        Prefix: "bronze/audit-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/"
+        ErrorOutputPrefix: "errors/audit-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/hour=!{timestamp:HH}/!{firehose:error-output-type}/"
         BufferingHints:
           IntervalInSeconds: 300
           SizeInMBs: 64
@@ -1429,7 +1429,7 @@ Resources:
               - Sid: WriteQuarantineMetadata
                 Effect: Allow
                 Action: s3:PutObject
-                Resource: !Sub "${WebhookS3Bucket.Arn}/quarantine/audit-logs/*"
+                Resource: !Sub "${DataLakeS3Bucket.Arn}/quarantine/audit-logs/*"
               - Sid: SubmitNormalizedRecords
                 Effect: Allow
                 Action: firehose:PutRecordBatch
@@ -1473,7 +1473,7 @@ Resources:
         Variables:
           SOURCE_BUCKET: !Ref AuditLogS3Bucket
           DESTINATION_STREAM_NAME: !Ref AuditLogFirehoseDeliveryStream
-          QUARANTINE_BUCKET: !Ref WebhookS3Bucket
+          QUARANTINE_BUCKET: !Ref DataLakeS3Bucket
           QUARANTINE_PREFIX: quarantine/audit-logs
           ENVIRONMENT: !Ref Environment
           SCHEMA_VERSION: '2'
@@ -1905,12 +1905,12 @@ Outputs:
   WebhookEndpoint:
     Value: !Sub "https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/events"
     Description: "Provide this exact URL to your GitHub Webhook configuration payload URL field"
-  S3BucketName:
-    Value: !Ref WebhookS3Bucket
-    Description: "The name of your deployed Parquet data lake S3 bucket"
-  GlueDatabaseName:
-    Value: !Ref GlueDatabase
-    Description: "The name of your Glue database for Athena queries"
+  DataLakeS3BucketName:
+    Value: !Ref DataLakeS3Bucket
+    Description: "The name of the shared analytics data lake S3 bucket"
+  WebhookBronzeGlueDatabaseName:
+    Value: !Ref WebhookBronzeGlueDatabase
+    Description: "Glue database containing the bronze GitHub webhook table"
   FirehoseLogGroupName:
     Value: !Ref FirehoseLogGroup
     Description: "The CloudWatch log group containing Firehose delivery errors"
@@ -1918,7 +1918,7 @@ Outputs:
     Value: !Ref AthenaWorkGroup
     Description: "Select this workgroup in the Athena query editor before running queries"
   AthenaQueryResultsLocation:
-    Value: !Sub "s3://${WebhookS3Bucket}/athena-results/"
+    Value: !Sub "s3://${DataLakeS3Bucket}/athena-results/"
     Description: "The S3 location used for Athena query results"
   AuditLogS3BucketName:
     Value: !Ref AuditLogS3Bucket
@@ -1969,8 +1969,8 @@ Outputs:
     Value: !Ref WebhookSilverScheduleDeadLetterQueue
     Description: "SQS queue containing failed attempts to start the webhook silver Glue job"
   WebhookSilverWarehouseLocation:
-    Value: !Sub "s3://${WebhookS3Bucket}/silver/"
+    Value: !Sub "s3://${DataLakeS3Bucket}/silver/webhooks/"
     Description: "S3 warehouse root for webhook silver Iceberg tables"
   WebhookSilverQuarantineLocation:
-    Value: !Sub "s3://${WebhookS3Bucket}/quarantine/webhooks/"
+    Value: !Sub "s3://${DataLakeS3Bucket}/quarantine/webhooks/"
     Description: "S3 location for the webhook silver quarantine Iceberg table"

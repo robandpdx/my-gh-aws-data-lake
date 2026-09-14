@@ -57,6 +57,7 @@ class FakeSpark:
 class WebhookSilverJobTests(unittest.TestCase):
     def test_classifies_promoted_and_unmodeled_event_types(self):
         self.assertEqual(job.event_family("workflow_job"), "actions")
+        self.assertEqual(job.event_family("push"), "pushes")
         self.assertEqual(job.event_family("pull_request"), "pull_requests")
         self.assertEqual(job.event_family("secret_scanning_alert"), "security_alerts")
         self.assertEqual(job.event_family("team"), "organization_activity")
@@ -68,6 +69,7 @@ class WebhookSilverJobTests(unittest.TestCase):
             {
                 "actions_workflow_runs",
                 "actions_workflow_jobs",
+                "push_events",
                 "pull_requests",
                 "issues",
                 "security_alerts",
@@ -75,6 +77,21 @@ class WebhookSilverJobTests(unittest.TestCase):
             },
         )
         self.assertTrue(set(job.FAMILY_EVENT_TYPES) < set(job.TABLE_DEFINITIONS))
+
+    def test_defines_push_events_at_delivery_grain(self):
+        definition = job.TABLE_DEFINITIONS["push_events"]
+        columns = dict(definition["columns"])
+
+        self.assertEqual(job.FAMILY_EVENT_TYPES["push_events"], ("push",))
+        self.assertEqual(definition["partition_column"], "received_at")
+        self.assertEqual(columns["delivery_id"], "string")
+        self.assertEqual(columns["ref"], "string")
+        self.assertEqual(columns["before_sha"], "string")
+        self.assertEqual(columns["after_sha"], "string")
+        self.assertEqual(columns["forced"], "boolean")
+        self.assertEqual(columns["head_commit_timestamp"], "timestamp")
+        self.assertEqual(columns["commit_count"], "bigint")
+        self.assertEqual(columns["distinct_commit_count"], "bigint")
 
     def test_selects_event_specific_timestamp_paths(self):
         self.assertEqual(
@@ -132,7 +149,7 @@ class WebhookSilverJobTests(unittest.TestCase):
 
     def test_builds_one_bronze_path_per_backfill_day(self):
         arguments = Namespace(
-            bronze_path="s3://example/webhooks/",
+            bronze_path="s3://example/bronze/webhooks/",
             start_date="2026-08-31",
             end_date="2026-09-01",
         )
@@ -140,32 +157,32 @@ class WebhookSilverJobTests(unittest.TestCase):
         self.assertEqual(
             job.source_paths(arguments),
             [
-                "s3://example/webhooks/year=2026/month=08/day=31/",
-                "s3://example/webhooks/year=2026/month=09/day=01/",
+                "s3://example/bronze/webhooks/year=2026/month=08/day=31/",
+                "s3://example/bronze/webhooks/year=2026/month=09/day=01/",
             ],
         )
 
     def test_filters_empty_source_prefixes_before_starting_spark_read(self):
         paths = [
-            "s3://example/webhooks/year=2026/month=08/day=31/",
-            "s3://example/webhooks/year=2026/month=09/day=01/",
+            "s3://example/bronze/webhooks/year=2026/month=08/day=31/",
+            "s3://example/bronze/webhooks/year=2026/month=09/day=01/",
         ]
-        s3 = FakeS3({"webhooks/year=2026/month=09/day=01/"})
+        s3 = FakeS3({"bronze/webhooks/year=2026/month=09/day=01/"})
 
         self.assertEqual(job.paths_with_objects(paths, s3), [paths[1]])
         self.assertEqual(s3.requests[0]["Bucket"], "example")
         self.assertEqual(s3.requests[0]["MaxKeys"], 1)
 
     def test_configures_source_metadata_and_partition_discovery(self):
-        arguments = Namespace(bronze_path="s3://example/webhooks/")
-        paths = ["s3://example/webhooks/year=2026/month=09/day=04/"]
+        arguments = Namespace(bronze_path="s3://example/bronze/webhooks/")
+        paths = ["s3://example/bronze/webhooks/year=2026/month=09/day=04/"]
 
         options = job.source_read_options(arguments, paths)
 
         self.assertEqual(options["connection_options"]["paths"], paths)
         self.assertEqual(
             options["connection_options"]["basePath"],
-            "s3://example/webhooks/",
+            "s3://example/bronze/webhooks/",
         )
         self.assertEqual(options["connection_options"]["mergeSchema"], "true")
         self.assertEqual(
@@ -179,25 +196,25 @@ class WebhookSilverJobTests(unittest.TestCase):
     def test_extracts_partition_values_from_a_bounded_source_path(self):
         self.assertEqual(
             job.partition_values_from_path(
-                "s3://example/webhooks/year=2026/month=09/day=04/"
+                "s3://example/bronze/webhooks/year=2026/month=09/day=04/"
             ),
             ("2026", "09", "04"),
         )
         self.assertIsNone(
-            job.partition_values_from_path("s3://example/webhooks/")
+            job.partition_values_from_path("s3://example/bronze/webhooks/")
         )
 
     def test_generates_iceberg_v2_ddl_with_a_dedicated_location(self):
         statement = job.create_table_sql(
             "github_webhooks_silver_dev",
             "pull_requests",
-            "s3://example/silver/pull_requests/",
+            "s3://example/silver/webhooks/pull_requests/",
         )
 
         self.assertIn("USING iceberg", statement)
         self.assertIn("PARTITIONED BY (days(`received_at`))", statement)
         self.assertIn("'format-version'='2'", statement)
-        self.assertIn("s3://example/silver/pull_requests/", statement)
+        self.assertIn("s3://example/silver/webhooks/pull_requests/", statement)
 
     def test_generates_an_explicit_delivery_id_merge(self):
         statement = job.merge_sql(
@@ -236,11 +253,11 @@ class WebhookSilverJobTests(unittest.TestCase):
             "--environment",
             "dev",
             "--bronze_path",
-            "s3://example/webhooks/",
+            "s3://example/bronze/webhooks/",
             "--silver_database",
             "github_webhooks_silver_dev",
             "--warehouse_path",
-            "s3://example/silver/",
+            "s3://example/silver/webhooks/",
             "--quarantine_path",
             "s3://example/quarantine/webhooks/",
         ]

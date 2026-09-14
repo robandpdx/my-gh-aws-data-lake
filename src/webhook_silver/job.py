@@ -21,6 +21,7 @@ EVENT_FAMILY_BY_TYPE = {
     "workflow_dispatch": "actions",
     "workflow_job": "actions",
     "workflow_run": "actions",
+    "push": "pushes",
     "pull_request": "pull_requests",
     "pull_request_review": "pull_requests",
     "pull_request_review_comment": "pull_requests",
@@ -111,6 +112,7 @@ DEFAULT_TIMESTAMP_PATHS = (
 FAMILY_EVENT_TYPES = {
     "actions_workflow_runs": ("workflow_run",),
     "actions_workflow_jobs": ("workflow_job",),
+    "push_events": ("push",),
     "pull_requests": (
         "pull_request",
         "pull_request_review",
@@ -229,6 +231,25 @@ TABLE_DEFINITIONS = {
             ("created_at", "timestamp"),
             ("started_at", "timestamp"),
             ("completed_at", "timestamp"),
+        ),
+        "partition_column": "received_at",
+    },
+    "push_events": {
+        "columns": FAMILY_COMMON_COLUMNS
+        + (
+            ("ref", "string"),
+            ("before_sha", "string"),
+            ("after_sha", "string"),
+            ("base_ref", "string"),
+            ("created", "boolean"),
+            ("deleted", "boolean"),
+            ("forced", "boolean"),
+            ("compare_url", "string"),
+            ("head_commit_sha", "string"),
+            ("head_commit_timestamp", "timestamp"),
+            ("pusher_name", "string"),
+            ("commit_count", "bigint"),
+            ("distinct_commit_count", "bigint"),
         ),
         "partition_column": "received_at",
     },
@@ -601,6 +622,7 @@ def _family_domain_key(functions):
     return (
         functions.when(event_type == "workflow_run", _json_string("$.workflow_run.id", functions))
         .when(event_type == "workflow_job", _json_string("$.workflow_job.id", functions))
+        .when(event_type == "push", _json_string("$.ref", functions))
         .when(
             event_type.isin(
                 "pull_request",
@@ -934,6 +956,24 @@ def _family_frame(events, table_name, functions):
             _json_timestamp("$.workflow_job.started_at", functions).alias("started_at"),
             _json_timestamp("$.workflow_job.completed_at", functions).alias("completed_at"),
         ]
+    elif table_name == "push_events":
+        domain_columns = [
+            _json_string("$.ref", functions).alias("ref"),
+            _json_string("$.before", functions).alias("before_sha"),
+            _json_string("$.after", functions).alias("after_sha"),
+            _json_string("$.base_ref", functions).alias("base_ref"),
+            _json_boolean("$.created", functions).alias("created"),
+            _json_boolean("$.deleted", functions).alias("deleted"),
+            _json_boolean("$.forced", functions).alias("forced"),
+            _json_string("$.compare", functions).alias("compare_url"),
+            _json_string("$.head_commit.id", functions).alias("head_commit_sha"),
+            _json_timestamp("$.head_commit.timestamp", functions).alias(
+                "head_commit_timestamp"
+            ),
+            _json_string("$.pusher.name", functions).alias("pusher_name"),
+            _json_long("$.size", functions).alias("commit_count"),
+            _json_long("$.distinct_size", functions).alias("distinct_commit_count"),
+        ]
     elif table_name == "pull_requests":
         domain_columns = [
             _json_long("$.pull_request.id", functions).alias("pull_request_id"),
@@ -1216,6 +1256,7 @@ def run(argv=None):
             "QuarantinedRows": quarantine_count,
             "WorkflowRunRows": family_counts["actions_workflow_runs"],
             "WorkflowJobRows": family_counts["actions_workflow_jobs"],
+            "PushRows": family_counts["push_events"],
             "PullRequestRows": family_counts["pull_requests"],
             "IssueRows": family_counts["issues"],
             "SecurityAlertRows": family_counts["security_alerts"],

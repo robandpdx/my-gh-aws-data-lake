@@ -49,6 +49,24 @@ GROUP BY workflow_job_id
 ORDER BY completed_at DESC NULLS LAST;
 ```
 
+### Summarize push activity
+
+```sql
+SELECT
+  date_trunc('day', event_at) AS event_day,
+  organization_login,
+  repository_full_name,
+  ref,
+  count(*) AS push_deliveries,
+  sum(commit_count) AS commits,
+  sum(distinct_commit_count) AS distinct_commits,
+  count_if(forced) AS force_pushes
+FROM github_webhooks_silver_dev.push_events
+WHERE received_at >= current_timestamp - INTERVAL '30' DAY
+GROUP BY 1, 2, 3, 4
+ORDER BY event_day DESC, commits DESC;
+```
+
 ### Summarize pull request activity
 
 ```sql
@@ -514,7 +532,7 @@ webhook_activity AS (
     repository.id AS repository_id,
     max(repository.full_name) AS repository,
     count(*) AS webhook_event_count
-  FROM github_webhooks_dev.events
+  FROM github_webhooks_bronze_dev.events
   WHERE year = '2026'
     AND month = '09'
     AND day = '03'
@@ -548,7 +566,7 @@ SELECT
   nullif(action, '') AS action,
   repository.full_name AS repository,
   sender.login AS sender
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'
@@ -562,7 +580,7 @@ SELECT
   event_type,
   coalesce(nullif(action, ''), '(none)') AS action,
   count(*) AS delivery_count
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'
@@ -579,7 +597,7 @@ SELECT
   count(DISTINCT sender.login) AS distinct_senders,
   count_if(event_type = 'pull_request') AS pull_request_events,
   count_if(event_type = 'push') AS push_events
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'
@@ -610,7 +628,7 @@ SELECT
     json_extract_scalar(raw_payload, '$.pull_request.merged') AS boolean
   ) AS merged,
   json_extract_scalar(raw_payload, '$.pull_request.html_url') AS url
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'
@@ -631,7 +649,7 @@ SELECT
     '(in progress)'
   ) AS conclusion,
   count(*) AS run_events
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'
@@ -652,7 +670,7 @@ SELECT
     0
   ) AS commit_count,
   json_extract_scalar(raw_payload, '$.compare') AS compare_url
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'
@@ -670,7 +688,7 @@ duplicate records before downstream aggregation.
 SELECT
   id AS delivery_id,
   count(*) AS occurrence_count
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '09'
   AND day = '03'

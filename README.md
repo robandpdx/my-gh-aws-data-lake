@@ -9,14 +9,14 @@ Parquet, and catalogs them for Amazon Athena.
 ## Architecture Overview
 
 ```text
-GitHub webhooks -> API Gateway -> Data Firehose -> S3 webhooks/ Parquet
+GitHub webhooks -> API Gateway -> Data Firehose -> S3 bronze/webhooks/ Parquet
                                                  -> scheduled Glue 5 Spark
                                                  -> Iceberg silver core and family tables
 
 GitHub audit OIDC -> versioned raw S3 -> EventBridge -> encrypted SQS
                  -> Lambda normalizer
                  -> Data Firehose
-                 -> S3 audit-logs/ Parquet
+                 -> S3 bronze/audit-logs/ Parquet
              failures -> DLQ or quarantine metadata
 
 S3 Parquet -> AWS Glue Data Catalog -> Amazon Athena
@@ -41,8 +41,9 @@ The pipeline leverages a completely serverless architecture to process high-thro
   * Runs an hourly AWS Glue 5.0 Spark job with Glue job bookmarks and one
     concurrent run.
   * Creates Apache Iceberg v2 `events`, `actions_workflow_runs`,
-    `actions_workflow_jobs`, `pull_requests`, `issues`, `security_alerts`, and
-    `organization_activity` tables in `github_webhooks_silver_<environment>`.
+    `actions_workflow_jobs`, `push_events`, `pull_requests`, `issues`,
+    `security_alerts`, and `organization_activity` tables in
+    `github_webhooks_silver_<environment>`.
   * Reads the bronze S3 prefix directly because Firehose does not register
     Glue partitions, then uses `delivery_id` Iceberg merges for replay-safe
     materialization.
@@ -56,7 +57,7 @@ The pipeline leverages a completely serverless architecture to process high-thro
   * Acts as the real-time buffer engine, minimizing data pipeline latency.
   * Utilizes built-in inline record format serialization to convert raw incoming streaming JSON objects into high-performance, columnar **Apache Parquet** format.
   * Employs time-based and size-based delivery window thresholds to cluster files logically.
-  * Organizes streaming writes natively using standard Hive partitioning patterns: `webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/`.
+  * Organizes streaming writes natively using standard Hive partitioning patterns: `bronze/webhooks/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/`.
 
 * **Amazon API Gateway Framework**
   * Exposes a public, high-availability HTTPS REST API endpoint required by GitHub webhooks.
@@ -84,7 +85,7 @@ The pipeline leverages a completely serverless architecture to process high-thro
     stable identity, and exposes only stable envelope metadata as typed bronze
     columns. Request and response content remains restricted to `raw_payload`.
   * Converts normalized JSON to Snappy-compressed Parquet under
-    `audit-logs/year=YYYY/month=MM/day=DD/hour=HH/`.
+    `bronze/audit-logs/year=YYYY/month=MM/day=DD/hour=HH/`.
 
 * **Recovery and observability**
   * Provides a manually invoked replay Lambda for prefix-based backfills or
@@ -170,14 +171,14 @@ Use an enterprise global webhook separately when collecting enterprise-wide
   asynchronously after that response.
 * Allow up to **5 minutes** for low-volume traffic to appear. The Firehose stream
   flushes after 300 seconds or 64 MiB, whichever comes first.
-* Successful Parquet files are written below `webhooks/`. Records that reach
-  Firehose but cannot be converted are written below `webhooks-errors/`, with
+* Successful Parquet files are written below `bronze/webhooks/`. Records that
+  reach Firehose but cannot be converted are written below `errors/webhooks/`, with
   details in the `FirehoseLogGroupName` CloudFormation output.
 * The endpoint accepts both GitHub content types: `application/json` and
   `application/x-www-form-urlencoded`. Other content types receive HTTP 415.
 * Synchronous Firehose API errors are returned as non-2xx responses. Later
   format-conversion failures cannot change GitHub's original 200 response and
-  must be diagnosed under `webhooks-errors/`.
+  must be diagnosed under `errors/webhooks/`.
 * The `raw_payload`, `id`, and `event_type` fields are populated only for
   webhook records received after deploying the current API Gateway mapping.
 
@@ -187,16 +188,16 @@ Once the pipeline has captured its first set of live incoming events and deposit
   `AthenaWorkGroupName` CloudFormation output. The workgroup automatically
   stores encrypted query results at the `AthenaQueryResultsLocation` output,
   so no manual query result location is required.
-2. Use the database shown by the `GlueDatabaseName` CloudFormation output, then
-  repair the table partitions (the configured `dev` deployment uses
-  `github_webhooks_dev`):
+2. Use the database shown by the `WebhookBronzeGlueDatabaseName` CloudFormation
+  output, then repair the table partitions (the configured `dev` deployment
+  uses `github_webhooks_bronze_dev`):
 ```sql
-MSCK REPAIR TABLE github_webhooks_dev.events;
+MSCK REPAIR TABLE github_webhooks_bronze_dev.events;
 ```
 3. Query your data lake directly using standard SQL operations:
 ```sql
 SELECT event_type, action, repository.name, sender.login
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
   WHERE year = '2026' AND month = '08' 
   LIMIT 10;
 ```

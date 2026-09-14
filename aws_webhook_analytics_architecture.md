@@ -2,8 +2,8 @@
 
 ## Executive recommendation
 
-> **Implementation status (2026-09-03):** Phase 2 is implemented for the
-> webhook silver core and six event-family tables. The deployed Glue job reads
+> **Implementation status (2026-09-14):** Phase 2 is implemented for the
+> webhook silver core and seven event-family tables. The deployed Glue job reads
 > bronze Parquet directly from S3, performs replay-safe Iceberg v2 merges,
 > quarantines validation and payload-hash conflicts, and runs hourly. Phase 0
 > receiver hardening and the gold layer remain separate follow-up work.
@@ -117,35 +117,49 @@ Use separate Glue databases to make lifecycle, permissions, and table intent obv
 - `github_webhooks_silver_dev`
 - `github_webhooks_gold_dev`
 
-The deployed `github_webhooks_dev.events` table can remain as a compatibility name during migration, or be treated as the bronze table until a planned rename.
+The deployed bronze ingestion table is `github_webhooks_bronze_dev.events`.
 
 Recommended S3 prefixes in the existing environment bucket:
 
 ```text
-s3://github-webhooks-parquet-dev-953721827634/
-├── webhooks/                         # current bronze Parquet
-│   └── year=YYYY/month=MM/day=DD/
-├── webhooks-raw/                     # optional exact bodies for >1,000 KiB records
-│   └── ingest_date=YYYY-MM-DD/hour=HH/
-├── webhooks-errors/                  # Firehose failures
-├── quarantine/                       # ETL parse/schema/data-quality failures
-│   └── ingest_date=YYYY-MM-DD/reason=.../
+s3://github-data-lake-dev-953721827634/
+├── raw/
+│   └── webhooks/                     # optional exact request bodies
+│       └── ingest_date=YYYY-MM-DD/hour=HH/
+├── bronze/
+│   ├── webhooks/                     # webhook Parquet
+│   │   └── year=YYYY/month=MM/day=DD/
+│   └── audit-logs/                   # normalized audit-log Parquet
+│       └── year=YYYY/month=MM/day=DD/hour=HH/
 ├── silver/
-│   ├── events/
-│   ├── actions_workflow_runs/
-│   ├── actions_workflow_jobs/
-│   ├── pull_requests/
-│   ├── issues/
-│   ├── security_alerts/
-│   └── organization_activity/
+│   └── webhooks/
+│       ├── events/
+│       ├── actions_workflow_runs/
+│       ├── actions_workflow_jobs/
+│       ├── push_events/
+│       ├── pull_requests/
+│       ├── issues/
+│       ├── security_alerts/
+│       └── organization_activity/
 ├── gold/
 │   ├── event_activity_hourly/
 │   ├── repository_activity_daily/
 │   ├── actions_usage_daily/
 │   ├── pull_request_flow_daily/
 │   └── security_alert_activity_daily/
+├── quarantine/
+│   ├── webhooks/                     # validation and integrity conflicts
+│   └── audit-logs/                   # normalization failures
+├── errors/
+│   ├── webhooks/                     # webhook Firehose failures
+│   └── audit-logs/                   # audit-log Firehose failures
 └── athena-results/                   # existing Athena workgroup output
 ```
+
+Source-specific data follows `<zone>/<source>/`. Cross-source datasets use
+their analytical dataset name beneath `silver/` or `gold/`, and operational
+artifacts retain purpose-specific prefixes such as `athena-results/` and
+`glue-scripts/`.
 
 Use distinct KMS keys or key policies where raw payload sensitivity differs from aggregates. Do not point an Iceberg table at a prefix shared with non-Iceberg files.
 
@@ -194,7 +208,7 @@ SELECT
     approx_distinct(id) AS distinct_deliveries,
     avg(length(raw_payload)) AS average_payload_chars,
     max(length(raw_payload)) AS maximum_payload_chars
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE year = '2026'
   AND month = '08'
 GROUP BY 1, 2
@@ -204,7 +218,7 @@ ORDER BY deliveries DESC;
 Example view for Actions workflow jobs:
 
 ```sql
-CREATE OR REPLACE VIEW github_webhooks_dev.v_workflow_jobs AS
+CREATE OR REPLACE VIEW github_webhooks_bronze_dev.v_workflow_jobs AS
 SELECT
     id AS delivery_id,
     from_iso8601_timestamp(
@@ -223,7 +237,7 @@ SELECT
     json_extract_scalar(raw_payload, '$.workflow_job.conclusion') AS conclusion,
     CAST(json_extract(raw_payload, '$.workflow_job.labels') AS array(varchar)) AS runner_labels,
     raw_payload
-FROM github_webhooks_dev.events
+FROM github_webhooks_bronze_dev.events
 WHERE event_type = 'workflow_job';
 ```
 
@@ -273,6 +287,7 @@ Create a family table only when its fields have a durable analytical use case. G
 | --- | --- | --- |
 | `actions_workflow_runs` | one workflow-run delivery state | run ID, workflow ID/name, status, conclusion, attempt, branch, actor, created/started/updated times |
 | `actions_workflow_jobs` | one workflow-job delivery state | job ID, run ID, status, conclusion, runner name/group, labels, queued/started/completed times |
+| `push_events` | one push delivery | ref, before/after SHAs, create/delete/force flags, head commit, total/distinct commit counts |
 | `pull_requests` | one PR delivery state | PR ID/number, draft, merged, author, base/head refs, additions/deletions, created/closed/merged times |
 | `issues` | one issue delivery state | issue ID/number, state, state reason, type, author, assignees, labels, created/closed times |
 | `security_alerts` | one alert delivery state | alert kind, alert number, state, severity, resolution, timestamps |

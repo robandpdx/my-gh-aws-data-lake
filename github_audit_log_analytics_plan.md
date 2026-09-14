@@ -210,12 +210,14 @@ use, and remove it after OIDC is available.
 Suggested prefixes in the existing data-lake bucket are:
 
 ```text
-s3://github-webhooks-parquet-<environment>-<account>/
-├── webhooks/                         # existing webhook bronze
-├── audit-logs/                       # normalized audit bronze Parquet
-│   └── year=YYYY/month=MM/day=DD/hour=HH/
+s3://github-data-lake-<environment>-<account>/
+├── bronze/
+│   ├── webhooks/                     # webhook bronze Parquet
+│   └── audit-logs/                   # normalized audit bronze Parquet
+│       └── year=YYYY/month=MM/day=DD/hour=HH/
 ├── silver/
-│   ├── audit_events/
+│   ├── webhooks/                     # deployed webhook Iceberg tables
+│   ├── audit_events/                 # planned cross-source datasets
 │   ├── webhook_events/
 │   ├── pull_requests/
 │   ├── repositories/
@@ -226,9 +228,17 @@ s3://github-webhooks-parquet-<environment>-<account>/
 │   ├── repository_governance_daily/
 │   ├── git_activity_daily/
 │   └── pr_audit_correlation_daily/
-├── quarantine/audit-logs/
+├── quarantine/
+│   ├── webhooks/
+│   └── audit-logs/
+├── errors/
+│   ├── webhooks/                     # webhook Firehose failures
+│   └── audit-logs/                   # audit-log Firehose failures
 └── athena-results/
 ```
+
+Source-specific data follows `<zone>/<source>/`. The separate raw audit bucket
+keeps GitHub's fixed `YYYY/MM/DD/HH/mm/` object hierarchy at its root.
 
 Do not mix Iceberg metadata/data files with non-Iceberg files in the same S3
 prefix.
