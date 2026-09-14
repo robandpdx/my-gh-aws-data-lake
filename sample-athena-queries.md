@@ -84,6 +84,35 @@ GROUP BY 1, 2, 3
 ORDER BY event_day DESC, opened DESC;
 ```
 
+### Measure average pull request time to close
+
+This measures the time from initial creation to first closure and groups by
+pull request to avoid counting duplicate closure deliveries. Use
+`max(closed_at)` instead of `min(closed_at)` to measure time to final closure
+for pull requests that were reopened.
+
+```sql
+WITH closed_pull_requests AS (
+  SELECT
+    pull_request_id,
+    min(created_at) AS opened_at,
+    min(closed_at) AS closed_at
+  FROM github_webhooks_silver_dev.pull_requests
+  WHERE event_type = 'pull_request'
+    AND action = 'closed'
+    AND created_at IS NOT NULL
+    AND closed_at IS NOT NULL
+  GROUP BY pull_request_id
+)
+SELECT
+  count(*) AS pull_requests_closed,
+  round(
+    avg(date_diff('second', opened_at, closed_at)) / 3600.0,
+    2
+  ) AS average_hours_open
+FROM closed_pull_requests;
+```
+
 ### Review security alert transitions
 
 ```sql
