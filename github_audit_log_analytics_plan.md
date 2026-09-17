@@ -893,7 +893,7 @@ export CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER="false"
 sam validate --lint
 sam build
 sam deploy --guided \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --parameter-overrides \
     Environment=dev \
     owner=robandpdx \
@@ -919,7 +919,7 @@ For subsequent deployments, ensure the guided values saved to
 
 ```bash
 aws cloudformation describe-stacks \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --query 'Stacks[0].Outputs[?starts_with(OutputKey, `AuditLog`)].[OutputKey,OutputValue]' \
   --output table
 ```

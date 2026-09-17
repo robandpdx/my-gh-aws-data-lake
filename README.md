@@ -148,7 +148,7 @@ export AUDIT_LOG_ALARM_EMAIL=""
 sam validate --lint
 sam build
 sam deploy --guided \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --parameter-overrides \
     Environment=dev \
     owner=robandpdx \
@@ -275,7 +275,7 @@ The prefix follows the raw bucket's UTC `YYYY/MM/DD/HH/mm/` layout:
 
 ```bash
 export REPLAY_FUNCTION="$(aws cloudformation describe-stacks \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --query 'Stacks[0].Outputs[?OutputKey==`AuditLogReplayFunctionName`].OutputValue | [0]' \
   --output text)"
 
@@ -330,7 +330,7 @@ tables immediately, start the job returned by the
 
 ```bash
 export SILVER_JOB="$(aws cloudformation describe-stacks \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --query 'Stacks[0].Outputs[?OutputKey==`WebhookSilverGlueJobName`].OutputValue | [0]' \
   --output text)"
 
@@ -451,7 +451,7 @@ limited to 31 days, so split longer billing history into multiple invocations:
 
 ```bash
 export COPILOT_COORDINATOR="$(aws cloudformation describe-stacks \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --query 'Stacks[0].Outputs[?OutputKey==`CopilotCollectionCoordinatorFunctionName`].OutputValue | [0]' \
   --output text)"
 
@@ -474,7 +474,7 @@ the scheduled job's incremental state:
 
 ```bash
 export COPILOT_SILVER_JOB="$(aws cloudformation describe-stacks \
-  --stack-name robandpdx-gh-webhook-parquet-pipeline \
+  --stack-name <STACK_NAME> \
   --query 'Stacks[0].Outputs[?OutputKey==`CopilotSilverGlueJobName`].OutputValue | [0]' \
   --output text)"
 
