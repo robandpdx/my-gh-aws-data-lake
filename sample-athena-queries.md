@@ -380,6 +380,115 @@ GROUP BY action
 ORDER BY event_count DESC;
 ```
 
+## Enterprise identity and licenses
+
+The identity tables are daily snapshots from GitHub's enterprise
+`consumed-licenses` endpoint. They include license-associated users rather than
+every association in the broader membership CSV. Always select one complete
+snapshot and prune its `year`, `month`, and `day` partitions.
+
+### Review daily license utilization
+
+```sql
+SELECT
+  cast(snapshot_date AS date) AS snapshot_date,
+  total_seats_purchased,
+  total_seats_consumed,
+  total_seats_purchased - total_seats_consumed AS seats_available,
+  user_count
+FROM github_identity_bronze_dev.enterprise_license_summary_daily
+WHERE year = '2026'
+  AND month = '09'
+  AND day BETWEEN '01' AND '30'
+  AND complete
+ORDER BY snapshot_date DESC;
+```
+
+### Find users inactive for 90 days excluding authentication
+
+This example uses the 2026-09-17 roster snapshot and scans one year of audit
+history. Change both ranges together. GitHub's consumed-license endpoint does
+not return numeric user IDs, so this joins case-insensitive logins and can miss
+users who changed their login during the audit window. A null activity time
+means no qualifying event was observed in the selected history, not proof that
+the user has never been active.
+
+Review and extend the authentication action list against the actions present in
+your enterprise before using this query for access-removal decisions.
+
+```sql
+WITH authentication_actions (action) AS (
+  VALUES
+    ('user.login'),
+    ('user.failed_login'),
+    ('user.two_factor_authentication_failed'),
+    ('org.saml_sso_auth'),
+    ('business.saml_sso_response')
+),
+roster AS (
+  SELECT
+    users.github_login,
+    users.github_name,
+    users.member_roles,
+    users.enterprise_roles,
+    licenses.license_type
+  FROM github_identity_bronze_dev.enterprise_users_daily AS users
+  JOIN github_identity_bronze_dev.enterprise_licenses_daily AS licenses
+    ON users.snapshot_date = licenses.snapshot_date
+   AND users.github_login = licenses.github_login
+  WHERE users.year = '2026'
+    AND users.month = '09'
+    AND users.day = '17'
+    AND licenses.year = '2026'
+    AND licenses.month = '09'
+    AND licenses.day = '17'
+    AND users.github_login IS NOT NULL
+),
+ranked_events AS (
+  SELECT
+    document_id,
+    actor,
+    action,
+    event_timestamp,
+    row_number() OVER (
+      PARTITION BY document_id
+      ORDER BY normalized_at DESC, source_object_key DESC, source_record_index DESC
+    ) AS occurrence
+  FROM github_audit_logs_bronze_dev.bronze_events
+  WHERE year BETWEEN '2025' AND '2026'
+    AND event_timestamp >= TIMESTAMP '2025-09-17 00:00:00 UTC'
+    AND event_timestamp < TIMESTAMP '2026-09-18 00:00:00 UTC'
+    AND record_family = 'audit'
+    AND actor IS NOT NULL
+    AND NOT coalesce(actor_is_bot, false)
+),
+last_non_authentication_activity AS (
+  SELECT
+    lower(event.actor) AS actor_login,
+    max(event.event_timestamp) AS last_active_at
+  FROM ranked_events AS event
+  LEFT JOIN authentication_actions AS authentication
+    ON event.action = authentication.action
+  WHERE event.occurrence = 1
+    AND authentication.action IS NULL
+  GROUP BY lower(event.actor)
+)
+SELECT
+  roster.github_login,
+  roster.github_name,
+  roster.license_type,
+  roster.member_roles,
+  roster.enterprise_roles,
+  activity.last_active_at,
+  date_diff('day', activity.last_active_at, current_timestamp) AS inactive_days
+FROM roster
+LEFT JOIN last_non_authentication_activity AS activity
+  ON lower(roster.github_login) = activity.actor_login
+WHERE activity.last_active_at IS NULL
+   OR activity.last_active_at < current_timestamp - INTERVAL '90' DAY
+ORDER BY activity.last_active_at NULLS FIRST, roster.github_login;
+```
+
 ## Normalized audit bronze
 
 The `bronze_events` table reads Snappy-compressed Parquet produced by the audit

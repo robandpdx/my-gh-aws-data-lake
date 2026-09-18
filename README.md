@@ -510,7 +510,103 @@ The daily Glue 5.0 job uses two G.1X workers. At small volumes, Glue's minimum
 billed run duration is likely the dominant incremental silver cost; review job
 duration after several runs before increasing workers or schedule frequency.
 
-### 9. Next Steps
+### 9. Operate Enterprise Identity and License Collection
+
+Identity collection is separate from Copilot collection because the enterprise
+licensing endpoint requires an enterprise administrator credential. Create a
+dedicated fine-grained credential where supported, or a personal access token
+(classic) with only `read:enterprise`, and store it in Secrets Manager as:
+
+```json
+{
+  "token": "GITHUB_ENTERPRISE_READ_TOKEN"
+}
+```
+
+Enter the value directly in Secrets Manager or through another protected
+secret-management workflow. Do not place it in this repository, a
+CloudFormation parameter, or shell history. The secret must be in the stack's
+AWS Region. If it uses a customer-managed KMS key, grant
+`IdentityCollectorRole` `kms:Decrypt` and permit the role in the key policy.
+
+Deploy with `EnableIdentityCollection` set to `true` and pass the complete
+secret ARN as `GitHubIdentitySecretArn`. The schedule defaults to 09:00 UTC and
+can be changed with `IdentityCollectionScheduleExpression`.
+
+The consumed-licenses API returns only the enterprise's current state; it has
+no date range or historical `as of` parameter. Consequently, the earliest
+truthful automated baseline is the first successful collection. Trigger that
+baseline immediately after deployment, then let the daily schedule accumulate
+history:
+
+```bash
+export IDENTITY_COLLECTOR="$(aws cloudformation describe-stacks \
+  --stack-name <STACK_NAME> \
+  --query 'Stacks[0].Outputs[?OutputKey==`IdentityCollectorFunctionName`].OutputValue | [0]' \
+  --output text)"
+
+aws lambda invoke \
+  --function-name "$IDENTITY_COLLECTOR" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{}' \
+  /tmp/identity-collection.json
+
+jq . /tmp/identity-collection.json
+```
+
+The response should report `complete: true` and include `snapshot_date`,
+`user_count`, and `page_count`. To retry or replace the partition for a date on
+which the snapshot was actually collected, pass that same UTC date:
+
+```bash
+aws lambda invoke \
+  --function-name "$IDENTITY_COLLECTOR" \
+  --cli-binary-format raw-in-base64-out \
+  --payload '{"snapshot_date":"2026-09-18"}' \
+  /tmp/identity-collection.json
+```
+
+Do not invoke the collector with dates before the first collection in an
+attempt to manufacture a backfill. `snapshot_date` controls the destination
+partition only; every invocation still retrieves the current GitHub state and
+records the real retrieval time in `collected_at`. For history predating this
+pipeline, retain and reconcile any existing enterprise membership CSV exports,
+license reports, or other dated administrative records separately. The current
+collector does not import those formats, and a historical partition should be
+published only when its source artifact proves the corresponding effective
+date.
+
+The collector retrieves every page from
+`GET /enterprises/{enterprise}/consumed-licenses` before publishing anything.
+A failed page therefore cannot create a partial daily snapshot. Raw responses
+and a completion manifest are retained under `raw/identity/`; query these
+projected bronze tables in `github_identity_bronze_dev`:
+
+- `enterprise_users_daily`: license-associated users, roles, deployment
+  presence, pending organization invitations, and 2FA status.
+- `enterprise_licenses_daily`: license type and Cloud, Server, and Visual
+  Studio license indicators per associated user.
+- `enterprise_license_summary_daily`: purchased and consumed totals plus
+  collection completeness counts.
+
+The promoted tables intentionally omit email addresses, SAML NameIDs, and
+verified-domain email arrays. Restrict raw identity objects and these tables to
+authorized workforce and license administrators.
+
+This API is the correct automated denominator for license analysis, but it is
+not identical to GitHub's broader membership CSV. Periodically reconcile it
+against the enterprise membership export when administrators, non-license
+associations, or other access relationships must be audited. The API also does
+not return a GitHub numeric user ID, so audit joins use login and can miss an
+account whose login changed during the activity window.
+
+Monitor `IdentityCollectorFunctionName`,
+`IdentityCollectionDeadLetterQueueUrl`, the `GitHubDataLake/Identity` custom
+metrics, and the shared alarm topic. See
+[sample-athena-queries.md](./sample-athena-queries.md) for snapshot and inactive
+user queries.
+
+### 10. Next Steps
 
 See [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md)
 for the broader webhook analytics architecture.

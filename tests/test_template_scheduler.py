@@ -128,6 +128,27 @@ class SchedulerTemplateTests(unittest.TestCase):
         self.assertIn("  CopilotSilverJobFailureRule:", template)
         self.assertIn("cloudwatch:namespace: GitHubDataLake/CopilotSilver", template)
 
+    def test_identity_collection_is_opt_in_and_uses_a_dedicated_secret(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("  EnableIdentityCollection:", template)
+        self.assertIn("  GitHubIdentitySecretArn:", template)
+        self.assertIn("  IdentityCollectorFunction:", template)
+        self.assertIn("Resource: !Ref GitHubIdentitySecretArn", template)
+        self.assertIn("cloudwatch:namespace: GitHubDataLake/Identity", template)
+        self.assertNotIn("GITHUB_IDENTITY_TOKEN:", template)
+
+    def test_identity_tables_use_projected_daily_partitions(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('Name: !Sub "github_identity_bronze_${Environment}"', template)
+        self.assertIn("Name: enterprise_users_daily", template)
+        self.assertIn("Name: enterprise_licenses_daily", template)
+        self.assertIn("Name: enterprise_license_summary_daily", template)
+        self.assertIn("bronze/identity/users/year=${!year}", template)
+        self.assertIn("bronze/identity/licenses/year=${!year}", template)
+        self.assertIn("bronze/identity/license-summary/year=${!year}", template)
+
 
 if __name__ == "__main__":
     unittest.main()

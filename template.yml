@@ -73,6 +73,21 @@ Parameters:
     MinValue: 2
     MaxValue: 20
     Description: Number of G.1X workers allocated to the Copilot silver Glue job.
+  EnableIdentityCollection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Enable daily enterprise user and consumed-license snapshots.
+  GitHubIdentitySecretArn:
+    Type: String
+    Default: arn:aws:secretsmanager:us-east-1:000000000000:secret:disabled
+    AllowedPattern: '^arn:aws[a-zA-Z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$'
+    ConstraintDescription: Enter a complete Secrets Manager secret ARN.
+    Description: Secrets Manager ARN containing a token with read:enterprise access.
+  IdentityCollectionScheduleExpression:
+    Type: String
+    Default: cron(0 9 * * ? *)
+    Description: EventBridge schedule for daily enterprise identity collection in UTC.
 
 Rules:
   CopilotSecretRequiredWhenEnabled:
@@ -87,6 +102,18 @@ Rules:
                 - Ref: CopilotGitHubAppSecretArn
                 - arn:aws:secretsmanager:us-east-1:000000000000:secret:disabled
         AssertDescription: CopilotGitHubAppSecretArn must reference an existing secret when Copilot collection is enabled.
+  IdentitySecretRequiredWhenEnabled:
+    RuleCondition:
+      Fn::Equals:
+        - Ref: EnableIdentityCollection
+        - 'true'
+    Assertions:
+      - Assert:
+          Fn::Not:
+            - Fn::Equals:
+                - Ref: GitHubIdentitySecretArn
+                - arn:aws:secretsmanager:us-east-1:000000000000:secret:disabled
+        AssertDescription: GitHubIdentitySecretArn must reference an existing secret when identity collection is enabled.
 
 Conditions:
   ShouldCreateGitHubAuditLogOidcProvider:
@@ -101,6 +128,10 @@ Conditions:
   ShouldEnableCopilotCollection:
     Fn::Equals:
       - Ref: EnableCopilotCollection
+      - 'true'
+  ShouldEnableIdentityCollection:
+    Fn::Equals:
+      - Ref: EnableIdentityCollection
       - 'true'
 
 Resources:
@@ -2555,7 +2586,430 @@ Resources:
         - Key: Project
           Value: github-data-lake
 
-  # 13. Scheduled Copilot bronze-to-silver Iceberg normalization
+  # 13. Daily enterprise user and consumed-license snapshots
+  IdentityGlueDatabase:
+    Type: AWS::Glue::Database
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: !Sub "github_identity_bronze_${Environment}"
+        Description: Daily enterprise user and consumed-license snapshots.
+
+  IdentityUsersTable:
+    Type: AWS::Glue::Table
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref IdentityGlueDatabase
+      TableInput:
+        Name: enterprise_users_daily
+        Description: Daily license-associated enterprise user roster without email or SAML identifiers.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2025,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          storage.location.template: !Sub "s3://${DataLakeS3Bucket}/bronze/identity/users/year=${!year}/month=${!month}/day=${!day}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/identity/users/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'false'
+              ignore.malformed.json: 'false'
+          Columns:
+            - Name: snapshot_date
+              Type: string
+            - Name: collected_at
+              Type: string
+            - Name: enterprise_slug
+              Type: string
+            - Name: github_login
+              Type: string
+            - Name: github_name
+              Type: string
+            - Name: github_profile
+              Type: string
+            - Name: has_github_com_user
+              Type: boolean
+            - Name: has_enterprise_server_user
+              Type: boolean
+            - Name: enterprise_server_user_ids
+              Type: array<string>
+            - Name: member_roles
+              Type: array<string>
+            - Name: enterprise_roles
+              Type: array<string>
+            - Name: organizations_with_pending_invites
+              Type: array<string>
+            - Name: two_factor_authentication_enabled
+              Type: boolean
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+
+  IdentityLicensesTable:
+    Type: AWS::Glue::Table
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref IdentityGlueDatabase
+      TableInput:
+        Name: enterprise_licenses_daily
+        Description: Daily enterprise license-consumption details by associated user.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2025,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          storage.location.template: !Sub "s3://${DataLakeS3Bucket}/bronze/identity/licenses/year=${!year}/month=${!month}/day=${!day}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/identity/licenses/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'false'
+              ignore.malformed.json: 'false'
+          Columns:
+            - Name: snapshot_date
+              Type: string
+            - Name: collected_at
+              Type: string
+            - Name: enterprise_slug
+              Type: string
+            - Name: github_login
+              Type: string
+            - Name: license_type
+              Type: string
+            - Name: total_user_accounts
+              Type: int
+            - Name: has_github_com_user
+              Type: boolean
+            - Name: has_enterprise_server_user
+              Type: boolean
+            - Name: has_visual_studio_subscription
+              Type: boolean
+            - Name: visual_studio_license_status
+              Type: string
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+
+  IdentityLicenseSummaryTable:
+    Type: AWS::Glue::Table
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref IdentityGlueDatabase
+      TableInput:
+        Name: enterprise_license_summary_daily
+        Description: Daily purchased and consumed enterprise license totals.
+        TableType: EXTERNAL_TABLE
+        Parameters:
+          classification: json
+          EXTERNAL: 'TRUE'
+          projection.enabled: 'true'
+          projection.year.type: integer
+          projection.year.range: '2025,2040'
+          projection.year.digits: '4'
+          projection.month.type: integer
+          projection.month.range: '1,12'
+          projection.month.digits: '2'
+          projection.day.type: integer
+          projection.day.range: '1,31'
+          projection.day.digits: '2'
+          storage.location.template: !Sub "s3://${DataLakeS3Bucket}/bronze/identity/license-summary/year=${!year}/month=${!month}/day=${!day}/"
+        StorageDescriptor:
+          Location: !Sub "s3://${DataLakeS3Bucket}/bronze/identity/license-summary/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              case.insensitive: 'false'
+              ignore.malformed.json: 'false'
+          Columns:
+            - Name: snapshot_date
+              Type: string
+            - Name: collected_at
+              Type: string
+            - Name: enterprise_slug
+              Type: string
+            - Name: total_seats_consumed
+              Type: int
+            - Name: total_seats_purchased
+              Type: int
+            - Name: user_count
+              Type: int
+            - Name: page_count
+              Type: int
+            - Name: complete
+              Type: boolean
+        PartitionKeys:
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+
+  IdentityCollectionDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      QueueName: !Sub "github-identity-collection-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  IdentityCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/github-identity-collector-${Environment}"
+      RetentionInDays: 30
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  IdentityCollectorRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      Description: Collects enterprise identity and license snapshots using a read-only enterprise token.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IdentityCollectorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadIdentityCredential
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GitHubIdentitySecretArn
+              - Sid: WriteIdentitySnapshots
+                Effect: Allow
+                Action: s3:PutObject
+                Resource:
+                  - !Sub "${DataLakeS3Bucket.Arn}/raw/identity/*"
+                  - !Sub "${DataLakeS3Bucket.Arn}/bronze/identity/*"
+              - Sid: WriteIdentityCollectorLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt IdentityCollectorLogGroup.Arn
+              - Sid: PublishIdentityMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: GitHubDataLake/Identity
+              - Sid: PublishXRayTelemetry
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  IdentityCollectorFunction:
+    Type: AWS::Serverless::Function
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      FunctionName: !Sub "github-identity-collector-${Environment}"
+      Description: Collects daily enterprise user and consumed-license snapshots.
+      CodeUri: src/identity_collector/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - arm64
+      MemorySize: 512
+      Timeout: 900
+      Tracing: Active
+      Role: !GetAtt IdentityCollectorRole.Arn
+      Environment:
+        Variables:
+          DATA_LAKE_BUCKET: !Ref DataLakeS3Bucket
+          ENVIRONMENT: !Ref Environment
+          GITHUB_IDENTITY_SECRET_ARN: !Ref GitHubIdentitySecretArn
+          GITHUB_ENTERPRISE_SLUG: !Ref GitHubEnterpriseSlug
+          GITHUB_API_VERSION: '2026-03-10'
+      Tags:
+        Environment: !Ref Environment
+        Owner: !Ref owner
+        Project: github-data-lake
+        DataLayer: bronze
+
+  IdentityCollectionSchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      Description: Invokes the daily enterprise identity collector.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/default"
+      Policies:
+        - PolicyName: InvokeIdentityCollector
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt IdentityCollectorFunction.Arn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt IdentityCollectionDeadLetterQueue.Arn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  IdentityCollectionSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      Name: !Sub "github-identity-collection-${Environment}"
+      Description: Collects a complete enterprise user and consumed-license snapshot.
+      State: ENABLED
+      ScheduleExpression: !Ref IdentityCollectionScheduleExpression
+      ScheduleExpressionTimezone: UTC
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt IdentityCollectorFunction.Arn
+        RoleArn: !GetAtt IdentityCollectionSchedulerRole.Arn
+        Input: '{}'
+        DeadLetterConfig:
+          Arn: !GetAtt IdentityCollectionDeadLetterQueue.Arn
+        RetryPolicy:
+          MaximumEventAgeInSeconds: 3600
+          MaximumRetryAttempts: 3
+
+  IdentityCollectorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      AlarmName: !Sub "github-identity-collector-errors-${Environment}"
+      AlarmDescription: Enterprise identity collection returned an invocation error.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IdentityCollectorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  IdentityCollectionDeadLetterAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: ShouldEnableIdentityCollection
+    Properties:
+      AlarmName: !Sub "github-identity-collection-dlq-${Environment}"
+      AlarmDescription: A scheduled identity collection invocation requires investigation.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt IdentityCollectionDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AuditLogAlarmTopic
+      OKActions:
+        - !Ref AuditLogAlarmTopic
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Owner
+          Value: !Ref owner
+        - Key: Project
+          Value: github-data-lake
+
+  # 14. Scheduled Copilot bronze-to-silver Iceberg normalization
   CopilotSilverGlueDatabase:
     Type: AWS::Glue::Database
     Condition: ShouldEnableCopilotCollection
@@ -3005,3 +3459,31 @@ Outputs:
     Condition: ShouldEnableCopilotCollection
     Value: !Sub "s3://${DataLakeS3Bucket}/quarantine/copilot/"
     Description: "S3 location for invalid Copilot bronze records"
+  IdentityGlueDatabaseName:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityGlueDatabase
+    Description: "Glue database containing enterprise user and license snapshots"
+  IdentityUsersTableName:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityUsersTable
+    Description: "Athena table containing daily license-associated enterprise users"
+  IdentityLicensesTableName:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityLicensesTable
+    Description: "Athena table containing daily enterprise license assignments"
+  IdentityLicenseSummaryTableName:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityLicenseSummaryTable
+    Description: "Athena table containing daily enterprise license totals"
+  IdentityCollectorFunctionName:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityCollectorFunction
+    Description: "Lambda function that collects enterprise identity snapshots"
+  IdentityCollectionScheduleName:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityCollectionSchedule
+    Description: "Daily EventBridge Scheduler schedule for identity collection"
+  IdentityCollectionDeadLetterQueueUrl:
+    Condition: ShouldEnableIdentityCollection
+    Value: !Ref IdentityCollectionDeadLetterQueue
+    Description: "SQS queue containing failed scheduled identity collection invocations"
