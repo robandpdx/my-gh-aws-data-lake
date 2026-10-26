@@ -63,6 +63,166 @@ GROUP BY 1, 2, 3
 ORDER BY report_day, ai_adoption_phase_number;
 ```
 
+### Daily model traffic by client
+
+`totals_by_client_json` is available in both `enterprise_usage_daily` and
+`user_usage_daily`. It preserves the server-counted client breakdown introduced
+in the [October 23, 2026 announcement](https://github.blog/changelog/2026-10-23-usage-metrics-api-adds-usage-from-tools-like-opencode/).
+It includes clients such as `opencode`, `claude_code`, `codex`, `copilot_cli`,
+and IDEs without requiring a fixed list of client names.
+
+```sql
+SELECT
+  report_day,
+  json_extract_scalar(client_usage, '$.client') AS client,
+  cast(json_extract_scalar(client_usage, '$.request_count') AS bigint) AS request_count,
+  cast(json_extract_scalar(client_usage, '$.session_count') AS bigint) AS session_count,
+  cast(json_extract_scalar(client_usage, '$.token_usage.prompt_tokens_sum') AS bigint)
+    AS prompt_tokens,
+  cast(json_extract_scalar(client_usage, '$.token_usage.output_tokens_sum') AS bigint)
+    AS output_tokens,
+  cast(json_extract_scalar(client_usage, '$.token_usage.avg_tokens_per_request') AS double)
+    AS avg_tokens_per_request
+FROM github_copilot_silver_dev.enterprise_usage_daily
+CROSS JOIN UNNEST(cast(json_parse(totals_by_client_json) AS array(json)))
+  AS clients(client_usage)
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day DESC, request_count DESC;
+```
+
+Requests count successful model calls, not prompts or user interactions. One
+prompt can produce multiple requests. Do not add these counts to IDE, CLI, App,
+or third-party-agent breakdowns: the surfaces can overlap, and third-party-agent
+activity counts jobs/interactions rather than this model traffic. Client
+identification is best-effort, not a verified identity. Daily session counts
+are not a distinct-session count across a longer reporting period.
+
+### Client traffic by model and selection mode
+
+Keep `model_selection_mode` as a separate dimension. Values include
+`user_selected`, `auto`, `product_selected`, `other`, and `unknown`; do not
+discard unfamiliar future values. Code review reports model `unknown`, and
+code review/cloud agent requests use `product_selected`. Missing nested values
+remain SQL null rather than being silently replaced with zeros.
+
+```sql
+SELECT
+  report_day,
+  json_extract_scalar(client_usage, '$.client') AS client,
+  json_extract_scalar(model_usage, '$.model') AS model,
+  json_extract_scalar(model_usage, '$.model_selection_mode') AS model_selection_mode,
+  cast(json_extract_scalar(model_usage, '$.request_count') AS bigint) AS request_count,
+  cast(json_extract_scalar(model_usage, '$.token_usage.prompt_tokens_sum') AS bigint)
+    AS prompt_tokens,
+  cast(json_extract_scalar(model_usage, '$.token_usage.output_tokens_sum') AS bigint)
+    AS output_tokens,
+  cast(json_extract_scalar(model_usage, '$.token_usage.avg_tokens_per_request') AS double)
+    AS avg_tokens_per_request
+FROM github_copilot_silver_dev.enterprise_usage_daily
+CROSS JOIN UNNEST(cast(json_parse(totals_by_client_json) AS array(json)))
+  AS clients(client_usage)
+CROSS JOIN UNNEST(cast(json_extract(client_usage, '$.totals_by_model') AS array(json)))
+  AS models(model_usage)
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day DESC, client, request_count DESC;
+```
+
+### Per-user OpenCode usage
+
+Use the restricted user-level access role. Do not combine user rows with the
+enterprise aggregate when summing usage.
+
+```sql
+SELECT
+  report_day,
+  user_id,
+  user_login,
+  cast(json_extract_scalar(client_usage, '$.request_count') AS bigint) AS request_count,
+  cast(json_extract_scalar(client_usage, '$.session_count') AS bigint) AS session_count
+FROM github_copilot_silver_dev.user_usage_daily
+CROSS JOIN UNNEST(cast(json_parse(totals_by_client_json) AS array(json)))
+  AS clients(client_usage)
+WHERE report_day >= current_date - INTERVAL '30' DAY
+  AND json_extract_scalar(client_usage, '$.client') = 'opencode'
+ORDER BY report_day DESC, request_count DESC;
+```
+
+All three queries omit records with a null or empty client array. A null
+`totals_by_client_json` means the source field was absent/null, or the silver row
+has not been reprocessed since the column was added; `[]` means the source
+reported no client usage. Neither should be used to infer a collection failure.
+For records not yet reprocessed, query
+`json_extract(raw_payload, '$.totals_by_client')` instead.
+
+### Named skills, custom agents, MCP servers, slash commands, and plugins
+
+Both enterprise and user usage tables expose these JSON arrays:
+
+| Silver column | Entry name field |
+| --- | --- |
+| `totals_by_skill_json` | `skill` |
+| `totals_by_custom_agent_json` | `custom_agent` |
+| `totals_by_mcp_json` | `mcp` |
+| `totals_by_slash_cmd_json` | `slash_cmd` |
+| `totals_by_plugin_json` | `plugin` |
+
+For example, list daily enterprise skill interactions:
+
+```sql
+SELECT
+  report_day,
+  json_extract_scalar(customization, '$.skill') AS skill,
+  cast(json_extract_scalar(customization, '$.interaction_count') AS bigint)
+    AS interaction_count
+FROM github_copilot_silver_dev.enterprise_usage_daily
+CROSS JOIN UNNEST(cast(json_parse(totals_by_skill_json) AS array(json)))
+  AS customizations(customization)
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day DESC, interaction_count DESC;
+```
+
+To query MCP servers, substitute `totals_by_mcp_json` and `$.mcp` (and rename
+the output alias); use the table above for other categories. For per-user
+analysis, use `user_usage_daily` and select `user_id`/`user_login` under a
+restricted access role. Do not add user rows to enterprise aggregates.
+Unnest one category at a time: unnesting multiple arrays together multiplies
+rows and inflates counts.
+
+The [October 22, 2026 announcement](https://github.blog/changelog/2026-10-22-custom-skills-agents-and-mcp-servers-in-usage-metrics-api/)
+allows up to 25 entries per record, with remaining activity in a trailing
+`other` bucket. Keep that bucket; the array is not an exhaustive inventory.
+Configured names can disclose internal information, are trimmed/limited to
+128 characters upstream, and path-like names remain `other`/`custom`.
+These are telemetry-based interaction counts, not server-counted model
+requests or billing totals. Do not sum categories as independent activity.
+
+### Per-user customization breadth
+
+The five distinct-use counters are typed `bigint` in `user_usage_daily`.
+They describe distinct customizations used by that user on that day, not the
+number of visible array entries, which is capped upstream. Summing them across
+users or days does not give enterprise-wide distinct customization counts.
+
+```sql
+SELECT
+  report_day,
+  user_id,
+  user_login,
+  distinct_skill_use_count,
+  distinct_custom_agent_use_count,
+  distinct_mcp_use_count,
+  distinct_slash_cmd_use_count,
+  distinct_plugin_use_count
+FROM github_copilot_silver_dev.user_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day DESC, user_id;
+```
+
+Missing/null source fields stay SQL null, empty arrays stay `[]`, and explicit
+zero counters stay zero. JSON arrays with missing/null values or `[]` produce
+no rows when unnested. Earlier report days retain `other`/`custom`; replaying
+silver cannot recover names absent from the original report.
+
 ### Repository pull-request activity
 
 ```sql
@@ -1026,4 +1186,3 @@ GROUP BY id
 HAVING count(*) > 1
 ORDER BY occurrence_count DESC;
 ```
-

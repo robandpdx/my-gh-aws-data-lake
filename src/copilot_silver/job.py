@@ -64,12 +64,26 @@ PULL_REQUEST_COLUMNS = (
 )
 
 BREAKDOWN_COLUMNS = (
+    ("totals_by_client_json", "string"),
+    ("totals_by_skill_json", "string"),
+    ("totals_by_custom_agent_json", "string"),
+    ("totals_by_mcp_json", "string"),
+    ("totals_by_slash_cmd_json", "string"),
+    ("totals_by_plugin_json", "string"),
     ("totals_by_feature_json", "string"),
     ("totals_by_ide_json", "string"),
     ("totals_by_language_feature_json", "string"),
     ("totals_by_language_model_json", "string"),
     ("totals_by_model_feature_json", "string"),
     ("totals_by_third_party_agent_json", "string"),
+)
+
+USER_CUSTOMIZATION_COLUMNS = (
+    ("distinct_skill_use_count", "bigint"),
+    ("distinct_custom_agent_use_count", "bigint"),
+    ("distinct_mcp_use_count", "bigint"),
+    ("distinct_slash_cmd_use_count", "bigint"),
+    ("distinct_plugin_use_count", "bigint"),
 )
 
 TABLE_DEFINITIONS = {
@@ -144,6 +158,7 @@ TABLE_DEFINITIONS = {
             ("user_login", "string"),
             ("ai_credits_used", "decimal(38,12)"),
         )
+        + USER_CUSTOMIZATION_COLUMNS
         + ACTIVITY_COLUMNS
         + (
             ("used_agent", "boolean"),
@@ -320,6 +335,21 @@ TBLPROPERTIES (
   'write.parquet.compression-codec'='zstd',
   'write.target-file-size-bytes'='268435456'
 )"""
+
+
+def ensure_table(spark, database_name, table_name, location):
+    spark.sql(create_table_sql(database_name, table_name, location))
+    target = qualified_table(database_name, table_name)
+    existing_columns = set(spark.table(target).columns)
+    missing_columns = [
+        f"{_quote_identifier(column_name)} {column_type}"
+        for column_name, column_type in TABLE_DEFINITIONS[table_name]["columns"]
+        if column_name not in existing_columns
+    ]
+    if missing_columns:
+        spark.sql(
+            f"ALTER TABLE {target} ADD COLUMNS ({', '.join(missing_columns)})"
+        )
 
 
 def merge_sql(database_name, table_name, source_view):
@@ -598,6 +628,12 @@ def _pull_request_expressions(functions):
 
 def _breakdown_expressions(functions):
     paths = {
+        "totals_by_client_json": "$.totals_by_client",
+        "totals_by_skill_json": "$.totals_by_skill",
+        "totals_by_custom_agent_json": "$.totals_by_custom_agent",
+        "totals_by_mcp_json": "$.totals_by_mcp",
+        "totals_by_slash_cmd_json": "$.totals_by_slash_cmd",
+        "totals_by_plugin_json": "$.totals_by_plugin",
         "totals_by_feature_json": "$.totals_by_feature",
         "totals_by_ide_json": "$.totals_by_ide",
         "totals_by_language_feature_json": "$.totals_by_language_feature",
@@ -724,6 +760,10 @@ def _user_frame(prepared, functions):
             _json_string("$.user_login", functions),
         ).alias("user_login"),
         _json_decimal("$.ai_credits_used", functions).alias("ai_credits_used"),
+        *[
+            _json_long(f"$.{column_name}", functions).alias(column_name)
+            for column_name, _ in USER_CUSTOMIZATION_COLUMNS
+        ],
         *_activity_expressions(functions),
         *[
             _json_boolean(f"$.{column_name}", functions).alias(column_name)
@@ -936,12 +976,11 @@ def run(argv=None):
     job.init(arguments.JOB_NAME, vars(arguments))
 
     for table_name in TABLE_DEFINITIONS:
-        spark.sql(
-            create_table_sql(
-                arguments.silver_database,
-                table_name,
-                table_location(arguments, table_name),
-            )
+        ensure_table(
+            spark,
+            arguments.silver_database,
+            table_name,
+            table_location(arguments, table_name),
         )
 
     s3_client = boto3.client("s3")

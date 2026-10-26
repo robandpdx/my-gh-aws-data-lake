@@ -198,6 +198,80 @@ class CopilotCollectorTests(unittest.TestCase):
         )
         self.assertEqual(self.s3.objects[bronze_key], b"")
 
+    def test_preserves_client_breakdowns_in_raw_and_bronze_usage_reports(self):
+        clients = [
+            {
+                "client": "opencode",
+                "request_count": 12,
+                "session_count": 3,
+                "token_usage": {
+                    "prompt_tokens_sum": 1000,
+                    "output_tokens_sum": 200,
+                    "avg_tokens_per_request": 100.0,
+                },
+                "totals_by_model": [
+                    {
+                        "model": "example-model",
+                        "model_selection_mode": mode,
+                        "request_count": 2,
+                        "token_usage": {
+                            "prompt_tokens_sum": 100,
+                            "output_tokens_sum": 20,
+                            "avg_tokens_per_request": 60.0,
+                        },
+                    }
+                    for mode in (
+                        "user_selected", "auto", "product_selected", "other", "unknown",
+                        "future_mode",
+                    )
+                ],
+                "future_field": {"preserved": True},
+            },
+            {"client": "other", "request_count": 0, "totals_by_model": []},
+            {"client": "future_client", "request_count": 1},
+        ]
+        for report_type in ("enterprise", "users"):
+            for breakdown in ({}, {"totals_by_client": []}, {"totals_by_client": clients}):
+                with self.subTest(report_type=report_type, breakdown=breakdown):
+                    task = {
+                        "source": "usage",
+                        "report_type": report_type,
+                        "report_day": "2026-10-23",
+                        "collection_date": "2026-10-26",
+                    }
+                    payload = {"enterprise_id": "1", "user_id": 42, **breakdown}
+                    report = (json.dumps(payload) + "\n").encode("utf-8")
+                    response = {"download_links": ["https://download.example/report"]}
+
+                    def download_report(url, path):
+                        path.write_bytes(report)
+
+                    with patch.dict(
+                        app.os.environ, self.environment, clear=True
+                    ), patch.object(
+                        app,
+                        "_github_request",
+                        return_value=(200, {}, json.dumps(response).encode("utf-8")),
+                    ), patch.object(
+                        app, "_download_to_path", side_effect=download_report
+                    ):
+                        count = app.collect_task(
+                            task, "installation-token", "2026-10-26T08:30:00Z"
+                        )
+
+                    self.assertEqual(count, 1)
+                    raw_key = (
+                        f"raw/copilot/usage/report_type={report_type}/report_day=2026-10-23/"
+                        "collection_date=2026-10-26/part-000.ndjson"
+                    )
+                    self.assertEqual(self.s3.objects[raw_key], report)
+                    bronze_key = (
+                        "bronze/copilot/usage/year=2026/month=10/day=23/"
+                        f"report_type={report_type}/collection-2026-10-26.ndjson"
+                    )
+                    record = json.loads(self.s3.objects[bronze_key])
+                    self.assertEqual(json.loads(record["raw_payload"]), payload)
+
     def test_rejects_invalid_usage_response_shape(self):
         task = {
             "source": "usage",
@@ -211,6 +285,27 @@ class CopilotCollectorTests(unittest.TestCase):
             return_value=(200, {}, b'[]'),
         ), self.assertRaisesRegex(ValueError, "must be a JSON object"):
             app.collect_task(task, "installation-token", "2026-09-14T08:30:00Z")
+
+    def test_preserves_named_customizations_and_long_tail_without_a_client_limit(self):
+        payload = {"enterprise_id": "1", "user_id": 42}
+        for name in ("skill", "custom_agent", "mcp", "slash_cmd", "plugin"):
+            payload[f"totals_by_{name}"] = [
+                {name: f"internal-{name}-{index}", "interaction_count": index + 1}
+                for index in range(24)
+            ] + [{name: "other", "interaction_count": 50}]
+            payload[f"distinct_{name}_use_count"] = 40
+        for report_type in ("enterprise", "users"):
+            with self.subTest(report_type=report_type), patch.dict(
+                app.os.environ, self.environment, clear=True
+            ):
+                task = {
+                    "source": "usage",
+                    "report_type": report_type,
+                    "report_day": "2026-10-23",
+                    "collection_date": "2026-10-26",
+                }
+                record = app._usage_record(task, payload, 0, "2026-10-26T08:30:00Z")
+                self.assertEqual(json.loads(record["raw_payload"]), payload)
 
     def test_returns_only_failed_sqs_messages(self):
         secret = FakeSecretsManager(

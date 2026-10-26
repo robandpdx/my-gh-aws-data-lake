@@ -445,6 +445,16 @@ there are no Hive partition columns to repair:
 Nested dimensional breakdowns remain JSON in silver because GitHub evolves
 those arrays independently. Stable top-level counters, identities, billing
 amounts, CLI/App counters, adoption fields, and pull-request metrics are typed.
+Both enterprise and user usage tables expose `totals_by_client_json`, including
+client request/session counts, token usage, and nested model/selection-mode
+breakdowns. The full report remains in `raw_payload`. Missing source fields
+remain SQL null; an empty source array remains `[]`.
+The same tables expose `totals_by_skill_json`, `totals_by_custom_agent_json`,
+`totals_by_mcp_json`, `totals_by_slash_cmd_json`, and `totals_by_plugin_json`.
+The user table also types `distinct_skill_use_count`,
+`distinct_custom_agent_use_count`, `distinct_mcp_use_count`,
+`distinct_slash_cmd_use_count`, and `distinct_plugin_use_count` as `bigint`.
+Zero counts are preserved; absent/null counters are not replaced with zeros.
 
 Invoke the coordinator directly for a bounded backfill. Each source window is
 limited to 31 days, so split longer billing history into multiple invocations:
@@ -509,6 +519,182 @@ retention requirements.
 The daily Glue 5.0 job uses two G.1X workers. At small volumes, Glue's minimum
 billed run duration is likely the dominant incremental silver cost; review job
 duration after several runs before increasing workers or schedule frequency.
+
+#### Deploying client-level usage support to an existing stack
+
+The [October 23, 2026 API addition](https://github.blog/changelog/2026-10-23-usage-metrics-api-adds-usage-from-tools-like-opencode/)
+is additive. Existing enterprise/user daily collection already archives
+`totals_by_client`; no new endpoint, GitHub permission, secret, or collection
+setting is needed. Organization-specific and 28-day collection are not required
+for this stack's existing enterprise-wide scope.
+
+1. Use the AWS account, profile, Region, and SAM configuration for the existing
+   deployment. Keep `EnableCopilotCollection=true` and the current secret ARN
+   and other parameter values. Do not replace saved parameters with the
+   minimal first-deployment example above.
+
+   ```bash
+   PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_copilot_*.py' -v
+   sam validate --lint
+   sam build --use-container
+   sam deploy --config-env default --confirm-changeset
+   ```
+
+   Substitute your configuration environment if it is not `default`, and
+   review the changeset before approving. Wait for `UPDATE_COMPLETE`. SAM
+   packages the silver script with the Glue script publisher; the changed
+   publisher version makes the custom resource upload the new script
+   automatically. No manual S3 upload is needed.
+
+2. Run the upgraded silver job, or wait for the next scheduled run. At startup
+   it creates missing tables and adds missing declared columns to existing
+   Iceberg tables before any merge, including when no new bronze rows are
+   available. This migration is repeatable and does not drop columns, change
+   existing column types, or rewrite historical rows. The existing Glue role
+   already has catalog-update permission. Do not edit Glue column metadata
+   manually or run `MSCK REPAIR TABLE`.
+
+   ```bash
+   export STACK_NAME="your-existing-stack-name"
+   export COPILOT_SILVER_JOB="$(aws cloudformation describe-stacks \
+     --stack-name "$STACK_NAME" \
+     --query 'Stacks[0].Outputs[?OutputKey==`CopilotSilverGlueJobName`].OutputValue | [0]' \
+     --output text)"
+
+   aws glue start-job-run --job-name "$COPILOT_SILVER_JOB"
+   ```
+
+   Save the returned `JobRunId` and check its state:
+
+   ```bash
+   aws glue get-job-run \
+     --job-name "$COPILOT_SILVER_JOB" \
+     --run-id <JOB_RUN_ID> \
+     --query 'JobRun.{State:JobRunState,Error:ErrorMessage}'
+   ```
+
+   Wait for `SUCCEEDED` before starting another run. The job allows only one
+   concurrent run; avoid the daily 10:30 UTC schedule (or your configured time)
+   during manual backfills. Inspect Glue logs on failure rather than assuming
+   a schema update completed.
+
+3. To populate the new column for previously processed dates, replay retained
+   bronze through silver with bookmarks disabled. This does not reset or
+   advance the scheduled job's bookmarks. For example, after bronze for these
+   report days is present:
+
+   ```bash
+   aws glue start-job-run \
+     --job-name "$COPILOT_SILVER_JOB" \
+     --arguments '{
+       "--job-bookmark-option":"job-bookmark-disable",
+       "--start_date":"2026-10-23",
+       "--end_date":"2026-10-25"
+     }'
+   ```
+
+   Choose dates actually available in bronze. Normal collection requests usage
+   from UTC today minus 10 days through today minus 4 days, so on October 26 the
+   normal run only requests through October 22. Newer report days will arrive
+   later; their absence is not a deployment failure. Replaying old bronze
+   cannot invent a missing source field. Only re-download reports using the
+   coordinator backfill above if GitHub has made enriched reports available;
+   the announcement does not promise historical backfill. Wait for all
+   collection tasks to finish successfully before replaying silver.
+
+4. In the stack's Athena workgroup, use the matching silver database name
+   (replace `dev` below if needed) to verify both table schemas:
+
+   ```sql
+   SELECT table_name, column_name, data_type
+   FROM information_schema.columns
+   WHERE table_schema = 'github_copilot_silver_dev'
+     AND table_name IN ('enterprise_usage_daily', 'user_usage_daily')
+     AND column_name = 'totals_by_client_json';
+   ```
+
+   Expect two rows with type `varchar`. Then check the chosen replay range:
+
+   ```sql
+   SELECT
+     report_day,
+     totals_by_client_json IS NOT NULL AS client_field_available,
+     json_array_length(totals_by_client_json) AS client_count
+   FROM github_copilot_silver_dev.enterprise_usage_daily
+   WHERE report_day BETWEEN DATE '2026-10-23' AND DATE '2026-10-25'
+   ORDER BY report_day;
+   ```
+
+   A null value means absent/null source data or an unreprocessed row, not zero
+   usage; `[]` means the source reported no client usage. Client/model and
+   restricted per-user queries are in
+   [sample-athena-queries.md](./sample-athena-queries.md#daily-model-traffic-by-client).
+   Counts represent successful model calls, not prompts, and overlap with
+   existing surface breakdowns. Client names are best-effort identifiers.
+
+#### Deploying named customization usage support
+
+The [October 22, 2026 API update](https://github.blog/changelog/2026-10-22-custom-skills-agents-and-mcp-servers-in-usage-metrics-api/)
+reports configured names for skills, custom agents, MCP servers, slash commands,
+and plugins. Existing raw/bronze collection already preserves these arrays
+without limiting their size. No new endpoint, secret, or permission is needed.
+
+Use the same build/deploy, silver-job startup, and bounded replay steps in
+[the client-level deployment instructions](#deploying-client-level-usage-support-to-an-existing-stack).
+The automatic migration adds all five JSON columns to each usage table and
+the five distinct-use counters to the user table, including when upgrading
+directly from a deployment without client-level support. No manual DDL or S3
+upload is needed. To verify the new columns in Athena:
+
+```sql
+SELECT table_name, column_name, data_type
+FROM information_schema.columns
+WHERE table_schema = 'github_copilot_silver_dev'
+  AND table_name IN ('enterprise_usage_daily', 'user_usage_daily')
+  AND column_name IN (
+    'totals_by_skill_json', 'totals_by_custom_agent_json', 'totals_by_mcp_json',
+    'totals_by_slash_cmd_json', 'totals_by_plugin_json',
+    'distinct_skill_use_count', 'distinct_custom_agent_use_count',
+    'distinct_mcp_use_count', 'distinct_slash_cmd_use_count', 'distinct_plugin_use_count'
+  )
+ORDER BY table_name, column_name;
+```
+
+Expect 15 rows: five `varchar` breakdowns on each table and five `bigint`
+counters only on `user_usage_daily`. Use the environment's database name.
+Replay dates already present in bronze to populate previously processed rows.
+Names appear only for report days processed by GitHub after this release;
+earlier reports retain `other`/`custom`, and replay does not reconstruct names.
+
+Before interpreting results:
+
+- Prompt mode, the Copilot app, and ACP integrations require Copilot CLI
+  **1.0.97+**; SDK-based experiences require Copilot SDK **1.0.21+**. CLI
+  interactive sessions also report names. Built-in IDE chat telemetry does not
+  report names; IDE agent experiences need the supported SDK.
+- Arrays contain up to 25 entries per record, with remaining activity in
+  `other`. Do not infer distinct-use counts from array length.
+- Counts are client telemetry and can undercount when clients are outdated or
+  telemetry is blocked. Use adoption trends, not exact accounting.
+- Configured names are trimmed and limited to 128 characters upstream.
+  Path-like names remain grouped under `other`/`custom`. Review names and
+  data-access policies before exporting even enterprise aggregate reports.
+
+See [customization queries](./sample-athena-queries.md#named-skills-custom-agents-mcp-servers-slash-commands-and-plugins)
+for names/interactions and restricted per-user distinct counts.
+
+The optional Spark/Iceberg integration test is
+`tests/test_copilot_silver_spark.py`. Standard unit-test runs skip it when
+PySpark is absent; in a Spark 3.5 environment with the Iceberg Spark runtime
+available, run it with `spark-submit` and `PYTHONPATH=src`. It verifies actual
+JSON extraction, missing/null/empty values, 25-entry arrays, typed counters,
+existing-table migration, and repeatable replay.
+
+```bash
+PYTHONPATH=src spark-submit \
+  --jars /path/to/iceberg-spark-runtime-3.5_2.12-1.7.1.jar \
+  tests/test_copilot_silver_spark.py
+```
 
 ### 9. Operate Enterprise Identity and License Collection
 
