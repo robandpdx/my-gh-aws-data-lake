@@ -375,6 +375,51 @@ Use the `WebhookSilverGlueDatabaseName`, `WebhookSilverWarehouseLocation`,
 See [sample-athena-queries.md](./sample-athena-queries.md) for reconciliation
 and family-table examples.
 
+### Import the Grafana usage dashboards
+
+Import each JSON file using
+**Dashboards > New > Import > Upload dashboard JSON file**. Each dashboard
+prompts for its one Amazon Athena datasource:
+
+| Dashboard | Charts | Existing datasource | Database queried |
+| --- | --- | --- | --- |
+| [Copilot adoption and usage](./dashboards/github-copilot.json) | 10 | `athena-copilot-datasource` | `github_copilot_silver_dev` |
+| [PRs and code activity](./dashboards/github-pr-code.json) | 5 | `athena-github-datasource` | `github_webhooks_silver_dev` |
+| [Actions usage and reliability](./dashboards/github-actions.json) | 5 | `athena-github-datasource` | `github_webhooks_silver_dev` |
+| [Audit activity and freshness](./dashboards/github-audit.json) | 4 | `athena-auditlogs-datasource` | `github_audit_logs_bronze_dev` |
+
+Import inputs are labeled with those datasource names. Grafana resolves their
+actual UIDs at import; the JSON does not assume a datasource name is its UID.
+Each datasource uses its configured region, catalog, and workgroup. The SQL
+uses fully qualified `dev` database names; change those names in the JSON for
+another environment. Keep the supplied dashboard UIDs so navigation links work
+after all four dashboards are imported. Links preserve the selected time range.
+If Grafana is hosted under a URL subpath, prefix each link URL with that subpath.
+
+The four dashboards contain 24 time-series charts in total; opening one only
+executes its own queries, rather than loading every section.
+All panels follow the global time picker, default to the last 90 days in UTC,
+and display observed data without replacing missing values with zero. Lines
+may connect sparse observations; points mark recorded dates. Auto-refresh is
+off because refreshing panels executes Athena queries and incurs scan costs.
+Copilot reports may lag, and webhook silver updates hourly.
+
+PR creation-cohort averages select each PR's latest observed non-null snapshot;
+historical averages can change as new webhooks arrive, even after the displayed
+range. Actions charts deduplicate completed workflow attempts or job IDs;
+execution minutes are wall-clock time, not billed minutes. Audit charts prune
+normalization-time partitions and deduplicate by `document_id` within the
+selected range, then plot by normalization day rather than original event day.
+Replayed audit events can therefore shift to a later day.
+
+Only enterprise-level Copilot aggregates and aggregated webhook/audit metrics
+are displayed. The queries do not return user names, IPs, or raw payloads.
+Copilot surfaces and customization categories can overlap; do not add them
+together or infer productivity or causation from correlated activity.
+Permissions still apply to the underlying data: use restricted Athena roles
+and Grafana access controls rather than treating a dashboard as a security
+boundary.
+
 ### 8. Operate Copilot Billing and Usage Collection
 
 Before enabling collection:

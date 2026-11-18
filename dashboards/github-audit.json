@@ -1,0 +1,351 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_AUDITLOGS",
+      "label": "athena-auditlogs-datasource",
+      "description": "Audit bronze: select athena-auditlogs-datasource",
+      "type": "datasource",
+      "pluginId": "grafana-athena-datasource",
+      "pluginName": "Amazon Athena"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "grafana-athena-datasource",
+      "name": "Amazon Athena",
+      "version": "3.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "uid": "github-audit-activity",
+  "title": "GitHub Audit | Activity & Freshness",
+  "description": "Partition-pruned and deduplicated audit activity plotted by normalization day, plus source-to-normalization delay.",
+  "tags": [
+    "github",
+    "athena",
+    "usage",
+    "audit"
+  ],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1h",
+      "6h",
+      "1d"
+    ]
+  },
+  "refresh": "",
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "GitHub Copilot | Adoption & Usage",
+      "type": "link",
+      "url": "/d/github-copilot-usage",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub | PRs & Code Activity",
+      "type": "link",
+      "url": "/d/github-pr-code",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub Actions | Usage & Reliability",
+      "type": "link",
+      "url": "/d/github-actions-usage",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Daily UTC trends.** All panels follow the global time picker; default: **90 days**. Auto-refresh is off to limit Athena scans. Use the dashboard links above to switch sections while preserving the time range.\n\n**No data is not zero usage.** Only recorded dates are shown; lines may connect sparse observations. Missing source values are not replaced with zero.\n\nCharts use **normalization time**, not original GitHub event time, to align with bronze partition pruning. Events are deduplicated by document ID within the selected range. Replays can move events to a newer normalization day. Delay includes source delivery, backlog, and replays. Actor names are used only for aggregate distinct counts; names, IPs, and raw payloads are not displayed. Restrict datasource access appropriately."
+      }
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Audit logs | Ingested activity & data freshness",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Ingested audit events & distinct actors",
+      "description": "Deduplicated by document_id within the selected normalization-time window. Actor names are used only for aggregate distinct counts and never displayed. Replays can move the selected occurrence to a newer normalization day.",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_AUDITLOGS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT normalized_at, actor,\n    row_number() OVER (PARTITION BY document_id\n      ORDER BY normalized_at DESC, source_object_key DESC, source_record_index DESC) AS rn\n  FROM github_audit_logs_bronze_dev.bronze_events\n  WHERE record_family = 'audit'\n    AND year BETWEEN $__rawTimeFrom('yyyy') AND $__rawTimeTo('yyyy')\n    AND concat(year, '-', month, '-', day, ' ', hour)\n      BETWEEN $__rawTimeFrom('yyyy-MM-dd HH') AND $__rawTimeTo('yyyy-MM-dd HH')\n    AND $__timeFilter(normalized_at)\n)\nSELECT date_trunc('day', normalized_at) AS time,\n  count(*) AS audit_events, count(DISTINCT actor) AS distinct_actors\nFROM ranked\nWHERE rn = 1\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Top 10 ingested audit categories",
+      "description": "Top categories by total deduplicated audit events in the selected normalization-time range, plotted daily. Top categories can change when the time range changes; all actors are aggregated.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_AUDITLOGS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT normalized_at, coalesce(action_category, 'Uncategorized') AS category,\n    row_number() OVER (PARTITION BY document_id\n      ORDER BY normalized_at DESC, source_object_key DESC, source_record_index DESC) AS rn\n  FROM github_audit_logs_bronze_dev.bronze_events\n  WHERE record_family = 'audit'\n    AND year BETWEEN $__rawTimeFrom('yyyy') AND $__rawTimeTo('yyyy')\n    AND concat(year, '-', month, '-', day, ' ', hour)\n      BETWEEN $__rawTimeFrom('yyyy-MM-dd HH') AND $__rawTimeTo('yyyy-MM-dd HH')\n    AND $__timeFilter(normalized_at)\n), events AS (\n  SELECT normalized_at, category FROM ranked WHERE rn = 1\n), top_categories AS (\n  SELECT category FROM events GROUP BY category ORDER BY count(*) DESC, category LIMIT 10\n)\nSELECT date_trunc('day', normalized_at) AS time, category, count(*) AS events\nFROM events\nWHERE category IN (SELECT category FROM top_categories)\nGROUP BY 1, 2\nORDER BY 1 ASC, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Ingested audit events by operation type",
+      "description": "Source operation_type labels, including an explicit Unspecified bucket for missing labels. Deduplicated by document_id and grouped by normalization day, not original event day.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_AUDITLOGS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT normalized_at, operation_type,\n    row_number() OVER (PARTITION BY document_id\n      ORDER BY normalized_at DESC, source_object_key DESC, source_record_index DESC) AS rn\n  FROM github_audit_logs_bronze_dev.bronze_events\n  WHERE record_family = 'audit'\n    AND year BETWEEN $__rawTimeFrom('yyyy') AND $__rawTimeTo('yyyy')\n    AND concat(year, '-', month, '-', day, ' ', hour)\n      BETWEEN $__rawTimeFrom('yyyy-MM-dd HH') AND $__rawTimeTo('yyyy-MM-dd HH')\n    AND $__timeFilter(normalized_at)\n)\nSELECT date_trunc('day', normalized_at) AS time,\n  coalesce(operation_type, 'Unspecified') AS operation, count(*) AS events\nFROM ranked\nWHERE rn = 1\nGROUP BY 1, 2\nORDER BY 1 ASC, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 65,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "Audit event-to-normalization delay | median & p95",
+      "description": "Minutes from GitHub event_timestamp to normalization, grouped by normalization day after document_id deduplication. Includes source delivery delays, backlog, and replays; not just processing latency. Missing/negative delays are excluded.",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_AUDITLOGS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT normalized_at, event_timestamp,\n    row_number() OVER (PARTITION BY document_id\n      ORDER BY normalized_at DESC, source_object_key DESC, source_record_index DESC) AS rn\n  FROM github_audit_logs_bronze_dev.bronze_events\n  WHERE record_family = 'audit'\n    AND year BETWEEN $__rawTimeFrom('yyyy') AND $__rawTimeTo('yyyy')\n    AND concat(year, '-', month, '-', day, ' ', hour)\n      BETWEEN $__rawTimeFrom('yyyy-MM-dd HH') AND $__rawTimeTo('yyyy-MM-dd HH')\n    AND $__timeFilter(normalized_at)\n)\nSELECT date_trunc('day', normalized_at) AS time,\n  approx_percentile(date_diff('second', event_timestamp, normalized_at) / 60.0, 0.5) AS median_minutes,\n  approx_percentile(date_diff('second', event_timestamp, normalized_at) / 60.0, 0.95) AS p95_minutes\nFROM ranked\nWHERE rn = 1 AND event_timestamp IS NOT NULL AND normalized_at >= event_timestamp\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "min": 0,
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

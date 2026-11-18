@@ -1,0 +1,690 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_COPILOT",
+      "label": "athena-copilot-datasource",
+      "description": "Copilot silver: select athena-copilot-datasource",
+      "type": "datasource",
+      "pluginId": "grafana-athena-datasource",
+      "pluginName": "Amazon Athena"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "grafana-athena-datasource",
+      "name": "Amazon Athena",
+      "version": "3.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "uid": "github-copilot-usage",
+  "title": "GitHub Copilot | Adoption & Usage",
+  "description": "Daily enterprise Copilot adoption, engagement, client traffic, and customization aggregates.",
+  "tags": [
+    "github",
+    "athena",
+    "usage",
+    "copilot"
+  ],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1h",
+      "6h",
+      "1d"
+    ]
+  },
+  "refresh": "",
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "GitHub | PRs & Code Activity",
+      "type": "link",
+      "url": "/d/github-pr-code",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub Actions | Usage & Reliability",
+      "type": "link",
+      "url": "/d/github-actions-usage",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub Audit | Activity & Freshness",
+      "type": "link",
+      "url": "/d/github-audit-activity",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Daily UTC trends.** All panels follow the global time picker; default: **90 days**. Auto-refresh is off to limit Athena scans. Use the dashboard links above to switch sections while preserving the time range.\n\n**No data is not zero usage.** Only recorded dates are shown; lines may connect sparse observations. Missing source values are not replaced with zero.\n\nCopilot reports can lag. Active-user counts are source-reported per enterprise, not distinct people across enterprises or days. Surfaces and customization categories overlap: do not add them together. Requests are model calls, not prompts. These are activity measures, not productivity scores or evidence of causation. No individual user or customization names are displayed."
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Copilot | Adoption, engagement & AI activity",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Active Copilot users | daily, weekly & monthly",
+      "description": "Source-reported rolling active-user counts on each report day, summed across stored enterprises. Weekly/monthly windows overlap; do not sum across days or treat these as cross-enterprise distinct people.",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  sum(daily_active_users) AS daily_active,\n  sum(weekly_active_users) AS weekly_active,\n  sum(monthly_active_users) AS monthly_active\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Copilot interactions, generations & acceptances",
+      "description": "Distinct source measures, not additive categories. Interactions are user initiated; generation/acceptance counts are telemetry activity, not requests, commits, or productivity.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  sum(user_initiated_interaction_count) AS interactions,\n  sum(code_generation_activity_count) AS generations,\n  sum(code_acceptance_activity_count) AS acceptances\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Code acceptance / generation activity",
+      "description": "100 * daily acceptance activity / generation activity, weighted by counts across enterprises. Not a suggestion-level acceptance probability. Null when the denominator is zero or absent; not capped at 100%.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  100.0 * sum(code_acceptance_activity_count)\n    / nullif(sum(code_generation_activity_count), 0) AS acceptance_activity_ratio\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Copilot-reported lines added & deleted",
+      "description": "Source-reported code-acceptance line counters, not repository diff statistics or a measure of code quality.",
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  sum(loc_added_sum) AS lines_added,\n  sum(loc_deleted_sum) AS lines_deleted\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Daily active users by Copilot surface",
+      "description": "CLI, App, cloud agent, and code review populations can overlap. Missing source counters remain null rather than zero.",
+      "gridPos": {
+        "x": 16,
+        "y": 13,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  sum(daily_active_cli_users) AS cli,\n  sum(daily_active_copilot_app_users) AS copilot_app,\n  sum(daily_active_copilot_cloud_agent_users) AS cloud_agent,\n  sum(daily_active_copilot_code_review_users) AS code_review\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Model requests by client",
+      "description": "Successful model calls, not prompts or user interactions. One prompt may produce multiple requests. Client names are best-effort identifiers. Missing/empty breakdowns return no series.",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  json_extract_scalar(client, '$.client') AS client,\n  sum(cast(json_extract_scalar(client, '$.request_count') AS bigint)) AS requests\nFROM github_copilot_silver_dev.enterprise_usage_daily\nCROSS JOIN UNNEST(cast(json_parse(totals_by_client_json) AS array(json))) AS clients(client)\nWHERE $__dateFilter(report_day)\nGROUP BY 1, 2\nORDER BY 1 ASC, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Client model traffic | prompt & output tokens",
+      "description": "Summed only across the server-counted client breakdown. Do not add these to overlapping IDE/CLI/App counters. Null token fields are not replaced with zeros.",
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  sum(cast(json_extract_scalar(client, '$.token_usage.prompt_tokens_sum') AS bigint)) AS prompt_tokens,\n  sum(cast(json_extract_scalar(client, '$.token_usage.output_tokens_sum') AS bigint)) AS output_tokens\nFROM github_copilot_silver_dev.enterprise_usage_daily\nCROSS JOIN UNNEST(cast(json_parse(totals_by_client_json) AS array(json))) AS clients(client)\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Customization interactions by category",
+      "description": "Enterprise aggregates only; customization names are not displayed. Each array is unnested independently to avoid multiplying counts. Categories overlap and must not be added together. Includes the source's other bucket.",
+      "gridPos": {
+        "x": 0,
+        "y": 29,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH daily AS (\n  SELECT report_day, totals_by_skill_json, totals_by_custom_agent_json,\n    totals_by_mcp_json, totals_by_slash_cmd_json, totals_by_plugin_json\n  FROM github_copilot_silver_dev.enterprise_usage_daily\n  WHERE $__dateFilter(report_day)\n), categories AS (\n  SELECT report_day, 'Skills' AS category, item FROM daily\n    CROSS JOIN UNNEST(cast(json_parse(totals_by_skill_json) AS array(json))) AS entries(item)\n  UNION ALL\n  SELECT report_day, 'Custom agents', item FROM daily\n    CROSS JOIN UNNEST(cast(json_parse(totals_by_custom_agent_json) AS array(json))) AS entries(item)\n  UNION ALL\n  SELECT report_day, 'MCP servers', item FROM daily\n    CROSS JOIN UNNEST(cast(json_parse(totals_by_mcp_json) AS array(json))) AS entries(item)\n  UNION ALL\n  SELECT report_day, 'Slash commands', item FROM daily\n    CROSS JOIN UNNEST(cast(json_parse(totals_by_slash_cmd_json) AS array(json))) AS entries(item)\n  UNION ALL\n  SELECT report_day, 'Plugins', item FROM daily\n    CROSS JOIN UNNEST(cast(json_parse(totals_by_plugin_json) AS array(json))) AS entries(item)\n)\nSELECT cast(report_day AS timestamp) AS time, category,\n  sum(cast(json_extract_scalar(item, '$.interaction_count') AS bigint)) AS interactions\nFROM categories\nGROUP BY 1, 2\nORDER BY 1 ASC, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Copilot-reported PR creation & review activity",
+      "description": "Enterprise Copilot report counters, not webhook counts. Copilot-created/reviewed counts are subsets of the respective totals, not additional PRs. Creation and review populations can overlap. Does not establish Copilot's causal effect.",
+      "gridPos": {
+        "x": 12,
+        "y": 29,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  sum(pull_requests_created) AS created_total,\n  sum(pull_requests_created_by_copilot) AS created_by_copilot,\n  sum(pull_requests_reviewed) AS reviewed_total,\n  sum(pull_requests_reviewed_by_copilot) AS reviewed_by_copilot\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Interactions per daily active Copilot user",
+      "description": "Daily total user-initiated interactions divided by daily active users across enterprise report rows. Not a per-person ranking, unique-user measure across enterprises, or productivity score. Null when daily active users is zero or absent.",
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_COPILOT}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT cast(report_day AS timestamp) AS time,\n  cast(sum(user_initiated_interaction_count) AS double)\n    / nullif(sum(daily_active_users), 0) AS interactions_per_active_user\nFROM github_copilot_silver_dev.enterprise_usage_daily\nWHERE $__dateFilter(report_day)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,405 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_GITHUB",
+      "label": "athena-github-datasource",
+      "description": "Webhook silver: select athena-github-datasource",
+      "type": "datasource",
+      "pluginId": "grafana-athena-datasource",
+      "pluginName": "Amazon Athena"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "grafana-athena-datasource",
+      "name": "Amazon Athena",
+      "version": "3.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "uid": "github-actions-usage",
+  "title": "GitHub Actions | Usage & Reliability",
+  "description": "Deduplicated completed workflow attempts, success rates, observed job execution time, and queue waits.",
+  "tags": [
+    "github",
+    "athena",
+    "usage",
+    "actions"
+  ],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1h",
+      "6h",
+      "1d"
+    ]
+  },
+  "refresh": "",
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "GitHub Copilot | Adoption & Usage",
+      "type": "link",
+      "url": "/d/github-copilot-usage",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub | PRs & Code Activity",
+      "type": "link",
+      "url": "/d/github-pr-code",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub Audit | Activity & Freshness",
+      "type": "link",
+      "url": "/d/github-audit-activity",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Daily UTC trends.** All panels follow the global time picker; default: **90 days**. Auto-refresh is off to limit Athena scans. Use the dashboard links above to switch sections while preserving the time range.\n\n**No data is not zero usage.** Only recorded dates are shown; lines may connect sparse observations. Missing source values are not replaced with zero.\n\nWebhook silver refreshes hourly. Workflow retries count as separate attempts; job snapshots are deduplicated by job ID. Execution minutes are observed wall time, **not billed minutes**. Queue wait includes scheduling/dependency delays and is measured only for completed jobs, not jobs still waiting."
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "GitHub Actions | Completed work & reliability",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Completed workflow attempts by conclusion",
+      "description": "One completed snapshot per workflow_run_id/run_attempt. Retries are separate attempts. Completion day uses updated_at from the completed payload. Missing run_attempt is treated as the initial attempt.",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT updated_at, conclusion,\n    row_number() OVER (PARTITION BY workflow_run_id, coalesce(run_attempt, 1)\n      ORDER BY updated_at DESC, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.actions_workflow_runs\n  WHERE event_type = 'workflow_run' AND action = 'completed' AND status = 'completed'\n    AND $__timeFilter(updated_at)\n)\nSELECT date_trunc('day', updated_at) AS time,\n  coalesce(conclusion, 'unknown') AS conclusion, count(*) AS attempts\nFROM ranked\nWHERE rn = 1\nGROUP BY 1, 2\nORDER BY 1 ASC, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 65,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Workflow attempt success rate",
+      "description": "Successful / all completed workflow attempts. Cancelled, skipped, neutral, failed, and unknown conclusions remain in the denominator. Retries count separately. No completed attempts means no rate, not 0%.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT updated_at, conclusion,\n    row_number() OVER (PARTITION BY workflow_run_id, coalesce(run_attempt, 1)\n      ORDER BY updated_at DESC, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.actions_workflow_runs\n  WHERE event_type = 'workflow_run' AND action = 'completed' AND status = 'completed'\n    AND $__timeFilter(updated_at)\n)\nSELECT date_trunc('day', updated_at) AS time,\n  100.0 * count_if(conclusion = 'success') / count(*) AS success_rate\nFROM ranked\nWHERE rn = 1\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Actions job execution minutes | observed, not billed",
+      "description": "Sum of started_at-to-completed_at job wall time, grouped by completion day. Deduplicated by workflow_job_id; rerun jobs with different IDs remain distinct. Includes hosted and self-hosted jobs, without billing rounding or runner multipliers.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT started_at, completed_at,\n    row_number() OVER (PARTITION BY workflow_job_id\n      ORDER BY completed_at DESC, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.actions_workflow_jobs\n  WHERE event_type = 'workflow_job' AND action = 'completed' AND status = 'completed'\n    AND $__timeFilter(completed_at)\n)\nSELECT date_trunc('day', completed_at) AS time,\n  sum(date_diff('second', started_at, completed_at)) / 60.0 AS execution_minutes\nFROM ranked\nWHERE rn = 1 AND started_at IS NOT NULL AND completed_at >= started_at\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "min": 0,
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 65,
+            "lineWidth": 1,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Actions job duration | median & p95",
+      "description": "Completed jobs with valid non-negative started_at-to-completed_at durations, deduplicated by job ID and grouped by completion day. Excludes jobs that never started.",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT started_at, completed_at,\n    row_number() OVER (PARTITION BY workflow_job_id\n      ORDER BY completed_at DESC, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.actions_workflow_jobs\n  WHERE event_type = 'workflow_job' AND action = 'completed' AND status = 'completed'\n    AND $__timeFilter(completed_at)\n)\nSELECT date_trunc('day', completed_at) AS time,\n  approx_percentile(date_diff('second', started_at, completed_at) / 60.0, 0.5) AS median_minutes,\n  approx_percentile(date_diff('second', started_at, completed_at) / 60.0, 0.95) AS p95_minutes\nFROM ranked\nWHERE rn = 1 AND started_at IS NOT NULL AND completed_at >= started_at\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "min": 0,
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Actions job queue wait | median & p95",
+      "description": "created_at-to-started_at elapsed time for completed jobs, grouped by completion day. Includes scheduling and dependency delays, not just runner capacity wait. Excludes queued/in-progress jobs and negative/missing durations.",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT created_at, started_at, completed_at,\n    row_number() OVER (PARTITION BY workflow_job_id\n      ORDER BY completed_at DESC, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.actions_workflow_jobs\n  WHERE event_type = 'workflow_job' AND action = 'completed' AND status = 'completed'\n    AND $__timeFilter(completed_at)\n)\nSELECT date_trunc('day', completed_at) AS time,\n  approx_percentile(date_diff('second', created_at, started_at) / 60.0, 0.5) AS median_minutes,\n  approx_percentile(date_diff('second', created_at, started_at) / 60.0, 0.95) AS p95_minutes\nFROM ranked\nWHERE rn = 1 AND created_at IS NOT NULL AND started_at >= created_at\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "min": 0,
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}

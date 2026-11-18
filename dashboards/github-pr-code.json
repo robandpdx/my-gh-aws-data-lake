@@ -1,0 +1,403 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_GITHUB",
+      "label": "athena-github-datasource",
+      "description": "Webhook silver: select athena-github-datasource",
+      "type": "datasource",
+      "pluginId": "grafana-athena-datasource",
+      "pluginName": "Amazon Athena"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "grafana-athena-datasource",
+      "name": "Amazon Athena",
+      "version": "3.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "text",
+      "name": "Text",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "uid": "github-pr-code",
+  "title": "GitHub | PRs & Code Activity",
+  "description": "Captured PR transitions, latest-known PR creation cohorts, merge latency, and push activity.",
+  "tags": [
+    "github",
+    "athena",
+    "usage",
+    "pull-requests"
+  ],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1h",
+      "6h",
+      "1d"
+    ]
+  },
+  "refresh": "",
+  "graphTooltip": 1,
+  "links": [
+    {
+      "title": "GitHub Copilot | Adoption & Usage",
+      "type": "link",
+      "url": "/d/github-copilot-usage",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub Actions | Usage & Reliability",
+      "type": "link",
+      "url": "/d/github-actions-usage",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    },
+    {
+      "title": "GitHub Audit | Activity & Freshness",
+      "type": "link",
+      "url": "/d/github-audit-activity",
+      "keepTime": true,
+      "includeVars": false,
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Reading this dashboard",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Daily UTC trends.** All panels follow the global time picker; default: **90 days**. Auto-refresh is off to limit Athena scans. Use the dashboard links above to switch sections while preserving the time range.\n\n**No data is not zero usage.** Only recorded dates are shown; lines may connect sparse observations. Missing source values are not replaced with zero.\n\nWebhook silver refreshes hourly. Creation-cohort charts use the latest observed PR snapshot, even after the displayed range, so historical averages can change. Transition counts require the corresponding opened/closed webhooks. Push commit entries are not unique repository commits. This is activity, not productivity or evidence of causation."
+      }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Pull requests & code | Captured webhook activity",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "PRs opened, merged & closed without merge",
+      "description": "Unique PRs per action/day. Openings use created_at; closures use merged_at or closed_at. Requires captured opened/closed webhooks; later review or label events do not backfill missing transitions. Repeated closures of one PR on the same day count once.",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH activity AS (\n  SELECT pull_request_id,\n    CASE WHEN action = 'opened' THEN 'opened'\n      WHEN merged = true THEN 'merged'\n      WHEN merged = false THEN 'closed_unmerged' END AS activity,\n    CASE WHEN action = 'opened' THEN created_at\n      WHEN merged = true THEN merged_at ELSE closed_at END AS activity_at\n  FROM github_webhooks_silver_dev.pull_requests\n  WHERE event_type = 'pull_request' AND action IN ('opened', 'closed')\n)\nSELECT date_trunc('day', activity_at) AS time,\n  count(DISTINCT CASE WHEN activity = 'opened' THEN pull_request_id END) AS opened,\n  count(DISTINCT CASE WHEN activity = 'merged' THEN pull_request_id END) AS merged,\n  count(DISTINCT CASE WHEN activity = 'closed_unmerged' THEN pull_request_id END) AS closed_unmerged\nFROM activity\nWHERE $__timeFilter(activity_at) AND activity IS NOT NULL\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 65,
+            "lineWidth": 1,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Average commits per PR | creation cohorts",
+      "description": "Each PR contributes its latest non-null observed commit count once, grouped by initial creation day. Snapshots can arrive after the selected time range: this is latest-known state, not an as-of historical snapshot. Missing counters are excluded.",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT created_at, commits,\n    row_number() OVER (PARTITION BY pull_request_id\n      ORDER BY updated_at DESC NULLS LAST, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.pull_requests\n  WHERE event_type = 'pull_request' AND commits IS NOT NULL\n    AND $__timeFilter(created_at)\n)\nSELECT date_trunc('day', created_at) AS time,\n  avg(commits) AS avg_commits_per_pr\nFROM ranked\nWHERE rn = 1\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "PR change size | average lines added & deleted",
+      "description": "Latest observed non-null additions/deletions snapshot per PR, grouped by initial creation day. Historical cohorts change as PRs evolve. Source counters are not added across webhook deliveries.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH ranked AS (\n  SELECT created_at, additions, deletions,\n    row_number() OVER (PARTITION BY pull_request_id\n      ORDER BY updated_at DESC NULLS LAST, received_at DESC, delivery_id DESC) AS rn\n  FROM github_webhooks_silver_dev.pull_requests\n  WHERE event_type = 'pull_request' AND additions IS NOT NULL AND deletions IS NOT NULL\n    AND $__timeFilter(created_at)\n)\nSELECT date_trunc('day', created_at) AS time,\n  avg(additions) AS avg_lines_added,\n  avg(deletions) AS avg_lines_deleted\nFROM ranked\nWHERE rn = 1\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Time to merge | median & p95",
+      "description": "Elapsed wall-clock hours from initial creation to merge, grouped by merge day. Includes draft/wait time; not active engineering time. Deduplicated by PR ID. Unmerged PRs are excluded, so this is not backlog age.",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "WITH merged_prs AS (\n  SELECT pull_request_id, min(created_at) AS created_at, max(merged_at) AS merged_at\n  FROM github_webhooks_silver_dev.pull_requests\n  WHERE event_type = 'pull_request' AND action = 'closed' AND merged = true\n    AND $__timeFilter(merged_at)\n  GROUP BY pull_request_id\n)\nSELECT date_trunc('day', merged_at) AS time,\n  approx_percentile(date_diff('second', created_at, merged_at) / 3600.0, 0.5) AS median_hours,\n  approx_percentile(date_diff('second', created_at, merged_at) / 3600.0, 0.95) AS p95_hours\nFROM merged_prs\nWHERE created_at IS NOT NULL AND merged_at >= created_at\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "h",
+          "min": 0,
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Push activity | deliveries & forced pushes",
+      "description": "Push webhook deliveries and deliveries explicitly flagged as forced. Silver deduplicates delivery_id; repeated pushes remain separate activity. Commit counts are not inferred from delivery counts.",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-athena-datasource",
+        "uid": "${DS_GITHUB}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": 0,
+          "connectionArgs": {
+            "region": "__default",
+            "catalog": "__default",
+            "database": "__default"
+          },
+          "rawSQL": "SELECT date_trunc('day', event_at) AS time,\n  count(*) AS push_deliveries,\n  count_if(forced = true) AS forced_push_deliveries\nFROM github_webhooks_silver_dev.push_events\nWHERE $__timeFilter(event_at)\nGROUP BY 1\nORDER BY 1 ASC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "always",
+            "pointSize": 5,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    }
+  ]
+}
