@@ -53,6 +53,7 @@ safe-outputs:
       - "tests/**"
       - "template.yml"
       - "README.md"
+      - "CHANGELOG.md"
       - "github-enterprise-data-collection-guide.md"
       - "github_audit_log_analytics_plan.md"
       - "aws_webhook_analytics_architecture.md"
@@ -81,7 +82,7 @@ Propose changes for human review; never merge, deploy, or enable collectors.
 - Capture the current UTC time once as `window_end`; set `window_start` to
   exactly seven days earlier. Review publications in
   `[window_start, window_end)`, and record both timestamps in every proposal.
-- Read `README.md`, `template.yml`, the collection guide, relevant source and
+- Read `README.md`, `CHANGELOG.md`, `template.yml`, the collection guide, relevant source and
   tests, and existing architecture/query documentation. Inspect implementation,
   not just README claims. The current baseline includes webhook bronze and
   silver ingestion, audit-log raw and bronze ingestion with replay, optional
@@ -158,6 +159,22 @@ rewrite or an unbounded historical audit.
   draft pull request; put all remaining actionable findings in one tracking issue.
   Every relevant finding must receive a disposition even when implementation
   exceeds this run's budget.
+- Keep `README.md` focused on the stack as a whole: current architecture,
+  supported data, configuration, setup, operation, and validation. Update those
+  descriptions when behavior changes, but do not add release history,
+  announcement recaps, upgrade instructions, or migration notes to the README.
+- For each implemented change, add or update an entry under `Unreleased` in
+  `CHANGELOG.md`. Describe the affected datasets/fields and compatibility
+  impact, and include upgrade, migration, replay/backfill, permission, and
+  administrator steps (or explicitly state that none are required). Link each
+  GitHub-driven change to its canonical GitHub changelog article when available,
+  with the article's publication date and supporting official documentation.
+  Do not substitute documentation links when a relevant announcement exists,
+  invent source links or release dates, or confuse an upstream announcement
+  date with this stack's release/deployment date. Preserve existing history
+  and avoid duplicate entries. Link to the changelog from the README rather
+  than duplicating migration instructions there. Keep blocked/deferred work
+  separate from implemented entries; report it in the tracking issue.
 - Preserve source-faithful raw data, schema-tolerant envelopes, stable identities,
   idempotent writes/merges, retries, pagination, late-data reconciliation,
   quarantine/DLQ handling, and replay compatibility. Unknown fields must not
