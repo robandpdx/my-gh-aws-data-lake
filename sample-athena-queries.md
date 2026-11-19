@@ -43,6 +43,121 @@ WHERE report_day >= current_date - INTERVAL '30' DAY
 ORDER BY report_day;
 ```
 
+### Copilot telemetry health
+
+These are daily counts, not additive unique-user totals. They can overlap;
+null means unavailable, including reports generated before the new fields.
+
+```sql
+SELECT
+  report_day,
+  daily_active_users,
+  missing_client_telemetry_user_count,
+  below_usage_metrics_minimum_user_count
+FROM github_copilot_silver_dev.enterprise_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day;
+```
+
+Under the restricted user-level role, inspect the version assessment without
+assuming that a missing assessment means the user met every minimum:
+
+```sql
+SELECT
+  report_day,
+  user_login,
+  client_telemetry_present,
+  json_extract(usage_metrics_requirements_json, '$.unmet') AS below_minimum_components,
+  json_extract(usage_metrics_requirements_json, '$.unknown') AS unknown_components
+FROM github_copilot_silver_dev.user_usage_daily
+WHERE report_day >= current_date - INTERVAL '7' DAY
+  AND (
+    client_telemetry_present = false
+    OR json_array_length(json_extract(usage_metrics_requirements_json, '$.unmet')) > 0
+  )
+ORDER BY report_day DESC, user_login;
+```
+
+### Dedicated VS Code Agents-window usage
+
+These fields describe the dedicated Agents window, not editor-window agent mode.
+Weekly/monthly values are calendar-to-date distinct-user counts, not sums of
+daily active users. Do not add these to other surfaces' user counts.
+
+```sql
+SELECT
+  report_day,
+  daily_active_vscode_agent_users,
+  weekly_active_vscode_agent_users,
+  monthly_active_vscode_agent_users,
+  vscode_agent_session_count,
+  vscode_agent_total_user_messages
+FROM github_copilot_silver_dev.enterprise_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day;
+```
+
+### Human pull request review stages
+
+The array is empty on days with no qualifying human-authored, human-reviewed
+merges; it is null when absent or not yet reprocessed. A single human review has
+zero minutes between first and final review. Durations belong to the merge day.
+Do not average daily medians or p90 values to obtain a longer-period percentile.
+
+```sql
+SELECT
+  report_day,
+  repository_full_name,
+  json_extract_scalar(stage, '$.authored_by') AS authored_by,
+  json_extract_scalar(stage, '$.reviewed_by') AS reviewed_by,
+  cast(json_extract_scalar(stage, '$.total_merged') AS bigint) AS qualifying_merges,
+  cast(json_extract_scalar(stage, '$.median_minutes_ready_to_first_review') AS double)
+    AS median_minutes_to_first_review,
+  cast(json_extract_scalar(stage, '$.p90_minutes_ready_to_first_review') AS double)
+    AS p90_minutes_to_first_review,
+  cast(json_extract_scalar(stage, '$.median_minutes_first_to_final_review') AS double)
+    AS median_minutes_in_review,
+  cast(json_extract_scalar(stage, '$.median_minutes_final_review_to_merge') AS double)
+    AS median_minutes_waiting_to_merge
+FROM github_copilot_silver_dev.repository_usage_daily
+CROSS JOIN UNNEST(cast(json_parse(pull_request_review_times_json) AS array(json)))
+  AS review_stages(stage)
+WHERE report_day >= current_date - INTERVAL '30' DAY
+ORDER BY report_day DESC, repository_full_name;
+```
+
+### Copilot code review outcomes
+
+Comments count when their PR merges, not when the review was posted. Addressed
+comments include manually made fixes and explicitly deferred fixes, not just
+clicked suggestions. Sum numerators/denominators before computing a period rate.
+A zero denominator produces null, not a misleading zero-percent rate. Rows
+without reported outcomes are excluded from both the numerator and denominator
+of the human-change-request rate.
+
+```sql
+SELECT
+  repository_full_name,
+  sum(copilot_review_comments_evaluated) AS evaluated_comments,
+  sum(copilot_review_comments_addressed) AS addressed_comments,
+  100.0 * sum(copilot_review_comments_addressed)
+    / nullif(sum(copilot_review_comments_evaluated), 0) AS addressed_percent,
+  100.0 * sum(copilot_review_merged_no_human_change_request)
+    / nullif(sum(
+        CASE WHEN copilot_review_merged_no_human_change_request IS NOT NULL
+          THEN pull_requests_merged_reviewed_by_copilot END
+      ), 0) AS no_later_human_change_request_percent
+FROM github_copilot_silver_dev.repository_usage_daily
+WHERE report_day >= current_date - INTERVAL '30' DAY
+GROUP BY repository_full_name
+ORDER BY evaluated_comments DESC;
+```
+
+The complete `copilot_code_review_json` preserves severity, review tier,
+comment type, customization, and future breakdowns. Query one array at a time:
+customization counts may overlap, and missing metadata can make breakdown
+totals lower than the overall evaluated total.
+
 ### Users by AI adoption phase
 
 User-level activity is identifiable employee data; apply a restricted Athena
@@ -476,11 +591,43 @@ SELECT
   action,
   state,
   severity,
-  resolution
+  resolution,
+  dependency_package,
+  dependency_version_requirement
 FROM github_webhooks_silver_dev.security_alerts
 WHERE received_at >= current_timestamp - INTERVAL '30' DAY
 ORDER BY event_at DESC;
 ```
+
+For a withdrawn Dependabot alert, `action = 'withdrawn'` is the signal that the
+alert was removed. Its sparse payload may have no state or dependency version.
+The version requirement is a manifest constraint or submitted resolved version,
+not necessarily the installed version or the advisory's vulnerable range.
+
+### Issue relationships and field changes
+
+```sql
+SELECT
+  event_at,
+  repository_full_name,
+  issue_id,
+  related_issue_id,
+  action,
+  issue_field_json,
+  issue_field_value_json,
+  changes_json
+FROM github_webhooks_silver_dev.issues
+WHERE received_at >= current_timestamp - INTERVAL '30' DAY
+  AND (
+    event_type = 'issue_relates_to'
+    OR action IN ('field_added', 'field_removed')
+  )
+ORDER BY event_at DESC;
+```
+
+Cross-repository relationship events intentionally omit `related_issue_id`.
+Do not infer that the relationship was removed from its absence; use `action`.
+Field JSON preserves multi-select values and explicit zero/false values.
 
 ## GitHub Enterprise audit logs
 

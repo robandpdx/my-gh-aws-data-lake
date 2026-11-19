@@ -741,6 +741,62 @@ PYTHONPATH=src spark-submit \
   tests/test_copilot_silver_spark.py
 ```
 
+#### Additional silver coverage from the September-November 2026 changelog
+
+The existing daily Copilot collectors already archive the new source fields.
+The silver job now also promotes:
+
+- Dedicated VS Code Agents-window active users, sessions, user-message totals,
+  and per-user `used_vscode_agent`, independently of editor-window agent mode.
+- Daily missing-client-telemetry and below-minimum-version counts, per-user
+  `client_telemetry_present`, and the complete `usage_metrics_requirements`
+  object as JSON.
+- Repository `pull_request_review_times_json`, preserving each author/reviewer
+  cohort's median and p90 timings rather than averaging percentiles.
+- Repository `copilot_code_review_json`, preserving all breakdowns and future
+  nested fields, plus typed evaluated/addressed comment counts and the number
+  of merged PRs without a later human change request.
+
+The webhook silver job now promotes `issue_relates_to` deliveries into `issues`,
+including nullable `related_issue_id`, and preserves issue field definitions,
+values, and changes as JSON. Subscribe your organization or GitHub App webhook
+to `issue_relates_to` as well as `issues`;
+enterprise global webhooks cannot emit this event. Cross-repository deliveries
+intentionally omit the other issue's identity; a null is not a collection error.
+The security-alert table also exposes Dependabot's
+`dependency_version_requirement`. Withdrawn alerts can contain only identifiers,
+so missing state/version fields remain null rather than rejecting the delivery.
+
+Both Glue jobs add missing Iceberg columns on startup without dropping existing
+columns or rows. A normal SAM build/deployment republishes the scripts through
+the versioned script publisher; no infrastructure permissions or schedules change.
+New columns on existing rows remain null until the corresponding bronze dates
+are replayed with bookmarks disabled. Existing webhook dates use arrival-date
+partitions; Copilot dates use report-day partitions. Follow each job's existing
+backfill instructions, including its date-window limit.
+
+Missing or null source fields remain SQL null; measured false/zero values and
+empty arrays stay distinct. Review-stage data starts with qualifying PRs ready
+for review on or after September 21, 2026; replay cannot manufacture earlier
+data. Telemetry gaps caused by affected IDE versions cannot be recovered either.
+Review outcomes count on the merge day and are not the same as suggestion-apply
+counts. Do not sum overlapping telemetry-health counts, average daily medians,
+or interpret absent telemetry as employee inactivity.
+
+See the [new Athena examples](./sample-athena-queries.md#copilot-telemetry-health)
+and the [historical coverage review and follow-up collection plans](./github-enterprise-data-collection-guide.md#changelog-coverage-review-september-18-november-18-2026).
+No new source, credentials, preview, or sensitive-content capture is enabled
+automatically. Focused local checks:
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -p 'test_*silver*.py'
+sam validate --lint
+```
+
+The optional Spark/Iceberg test above also exercises these new report shapes,
+legacy-table migration, stale/repeated replay, issue relationships, and sparse
+withdrawn Dependabot alerts.
+
 ### 9. Operate Enterprise Identity and License Collection
 
 Identity collection is separate from Copilot collection because the enterprise

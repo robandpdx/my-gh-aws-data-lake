@@ -247,6 +247,57 @@ class CopilotSilverJobTests(unittest.TestCase):
                 "s3://example/silver/copilot/enterprise_usage_daily/",
             )
 
+    def test_extracts_review_outcomes_and_stage_times_from_repository_reports(self):
+        prepared = Mock()
+        prepared.where.return_value.columns = []
+        functions = Mock()
+        functions.length.return_value = 1
+
+        job._repository_frame(prepared, functions)
+
+        for path in (
+            "$.pull_request_review_times",
+            "$.copilot_code_review",
+            "$.copilot_code_review.total_comments_evaluated",
+            "$.copilot_code_review.total_comments_addressed",
+            "$.copilot_code_review.total_merged_no_human_change_request_after_review",
+        ):
+            functions.get_json_object.assert_any_call("raw_payload", path)
+
+    def test_extracts_telemetry_health_and_dedicated_agents_window_activity(self):
+        prepared = Mock()
+        prepared.where.return_value.columns = []
+        for builder, paths in (
+            (
+                job._enterprise_frame,
+                (
+                    "$.missing_client_telemetry_user_count",
+                    "$.below_usage_metrics_minimum_user_count",
+                    "$.daily_active_vscode_agent_users",
+                    "$.weekly_active_vscode_agent_users",
+                    "$.monthly_active_vscode_agent_users",
+                ),
+            ),
+            (
+                job._user_frame,
+                (
+                    "$.client_telemetry_present",
+                    "$.usage_metrics_requirements",
+                    "$.used_vscode_agent",
+                ),
+            ),
+        ):
+            with self.subTest(builder=builder.__name__):
+                functions = Mock()
+                functions.length.return_value = 1
+                builder(prepared, functions)
+                for path in (
+                    *paths,
+                    "$.totals_by_vscode_agent.session_count",
+                    "$.totals_by_vscode_agent.total_user_messages",
+                ):
+                    functions.get_json_object.assert_any_call("raw_payload", path)
+
     def test_merge_prevents_an_older_snapshot_from_replacing_a_newer_one(self):
         statement = job.merge_sql(
             "github_copilot_silver_dev",

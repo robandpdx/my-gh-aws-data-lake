@@ -27,6 +27,7 @@ EVENT_FAMILY_BY_TYPE = {
     "pull_request_review_comment": "pull_requests",
     "issues": "issues",
     "issue_comment": "issues",
+    "issue_relates_to": "issues",
     "code_scanning_alert": "security_alerts",
     "dependabot_alert": "security_alerts",
     "secret_scanning_alert": "security_alerts",
@@ -82,6 +83,10 @@ EVENT_TIMESTAMP_PATHS = {
         "$.comment.created_at",
         "$.issue.updated_at",
     ),
+    "issue_relates_to": (
+        "$.issue.updated_at",
+        "$.issue.created_at",
+    ),
     "code_scanning_alert": (
         "$.alert.updated_at",
         "$.alert.created_at",
@@ -118,7 +123,7 @@ FAMILY_EVENT_TYPES = {
         "pull_request_review",
         "pull_request_review_comment",
     ),
-    "issues": ("issues", "issue_comment"),
+    "issues": ("issues", "issue_comment", "issue_relates_to"),
     "security_alerts": (
         "code_scanning_alert",
         "dependabot_alert",
@@ -297,6 +302,10 @@ TABLE_DEFINITIONS = {
             ("author_association", "string"),
             ("issue_type_id", "bigint"),
             ("issue_type_name", "string"),
+            ("related_issue_id", "bigint"),
+            ("issue_field_json", "string"),
+            ("issue_field_value_json", "string"),
+            ("changes_json", "string"),
             ("comments", "bigint"),
             ("created_at", "timestamp"),
             ("updated_at", "timestamp"),
@@ -315,6 +324,7 @@ TABLE_DEFINITIONS = {
             ("resolution_comment", "string"),
             ("secret_type", "string"),
             ("dependency_package", "string"),
+            ("dependency_version_requirement", "string"),
             ("created_at", "timestamp"),
             ("updated_at", "timestamp"),
             ("resolved_at", "timestamp"),
@@ -514,6 +524,21 @@ TBLPROPERTIES (
 )"""
 
 
+def ensure_table(spark, database_name, table_name, location):
+    spark.sql(create_table_sql(database_name, table_name, location))
+    target = qualified_table(database_name, table_name)
+    existing_columns = set(spark.table(target).columns)
+    missing_columns = [
+        f"{_quote_identifier(column_name)} {column_type}"
+        for column_name, column_type in TABLE_DEFINITIONS[table_name]["columns"]
+        if column_name not in existing_columns
+    ]
+    if missing_columns:
+        spark.sql(
+            f"ALTER TABLE {target} ADD COLUMNS ({', '.join(missing_columns)})"
+        )
+
+
 def merge_sql(database_name, table_name, source_view, key_column):
     columns = [column_name for column_name, _ in TABLE_DEFINITIONS[table_name]["columns"]]
     target_name = qualified_table(database_name, table_name)
@@ -632,8 +657,11 @@ def _family_domain_key(functions):
             _json_string("$.pull_request.id", functions),
         )
         .when(
-            event_type.isin("issues", "issue_comment"),
-            _json_string("$.issue.id", functions),
+            event_type.isin(*FAMILY_EVENT_TYPES["issues"]),
+            functions.coalesce(
+                _json_string("$.issue.id", functions),
+                _json_string("$.issue_id", functions),
+            ),
         )
         .when(
             event_type.isin(
@@ -1009,7 +1037,10 @@ def _family_frame(events, table_name, functions):
         ]
     elif table_name == "issues":
         domain_columns = [
-            _json_long("$.issue.id", functions).alias("issue_id"),
+            functions.coalesce(
+                _json_long("$.issue.id", functions),
+                _json_long("$.issue_id", functions),
+            ).alias("issue_id"),
             _json_long("$.issue.number", functions).alias("issue_number"),
             _json_string("$.issue.title", functions).alias("title"),
             _json_string("$.issue.state", functions).alias("state"),
@@ -1022,6 +1053,14 @@ def _family_frame(events, table_name, functions):
             ),
             _json_long("$.issue.type.id", functions).alias("issue_type_id"),
             _json_string("$.issue.type.name", functions).alias("issue_type_name"),
+            _json_long("$.related_issue_id", functions).alias("related_issue_id"),
+            functions.get_json_object("raw_payload", "$.issue_field").alias(
+                "issue_field_json"
+            ),
+            functions.get_json_object("raw_payload", "$.issue_field_value").alias(
+                "issue_field_value_json"
+            ),
+            functions.get_json_object("raw_payload", "$.changes").alias("changes_json"),
             _json_long("$.issue.comments", functions).alias("comments"),
             _json_timestamp("$.issue.created_at", functions).alias("created_at"),
             _json_timestamp("$.issue.updated_at", functions).alias("updated_at"),
@@ -1050,6 +1089,9 @@ def _family_frame(events, table_name, functions):
             _json_string("$.alert.secret_type", functions).alias("secret_type"),
             _json_string("$.alert.dependency.package.name", functions).alias(
                 "dependency_package"
+            ),
+            _json_string("$.alert.dependency.version_requirement", functions).alias(
+                "dependency_version_requirement"
             ),
             _json_timestamp("$.alert.created_at", functions).alias("created_at"),
             _json_timestamp("$.alert.updated_at", functions).alias("updated_at"),
@@ -1145,12 +1187,11 @@ def run(argv=None):
     job.init(arguments.JOB_NAME, vars(arguments))
 
     for table_name in TABLE_DEFINITIONS:
-        spark.sql(
-            create_table_sql(
-                arguments.silver_database,
-                table_name,
-                table_location(arguments, table_name),
-            )
+        ensure_table(
+            spark,
+            arguments.silver_database,
+            table_name,
+            table_location(arguments, table_name),
         )
 
     populated_source_paths = paths_with_objects(

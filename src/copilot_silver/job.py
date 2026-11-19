@@ -43,6 +43,8 @@ SURFACE_COLUMNS = (
     ("copilot_app_output_tokens_sum", "bigint"),
     ("copilot_app_prompt_tokens_sum", "bigint"),
     ("copilot_app_avg_tokens_per_request", "double"),
+    ("vscode_agent_session_count", "bigint"),
+    ("vscode_agent_total_user_messages", "bigint"),
 )
 
 PULL_REQUEST_COLUMNS = (
@@ -119,6 +121,8 @@ TABLE_DEFINITIONS = {
             ("report_day", "date"),
             ("enterprise_slug", "string"),
             ("enterprise_id", "string"),
+            ("missing_client_telemetry_user_count", "bigint"),
+            ("below_usage_metrics_minimum_user_count", "bigint"),
             ("daily_active_users", "bigint"),
             ("weekly_active_users", "bigint"),
             ("monthly_active_users", "bigint"),
@@ -139,6 +143,9 @@ TABLE_DEFINITIONS = {
             ("daily_active_copilot_app_users", "bigint"),
             ("weekly_active_copilot_app_users", "bigint"),
             ("monthly_active_copilot_app_users", "bigint"),
+            ("daily_active_vscode_agent_users", "bigint"),
+            ("weekly_active_vscode_agent_users", "bigint"),
+            ("monthly_active_vscode_agent_users", "bigint"),
         )
         + ACTIVITY_COLUMNS
         + SURFACE_COLUMNS
@@ -157,6 +164,8 @@ TABLE_DEFINITIONS = {
             ("user_id", "bigint"),
             ("user_login", "string"),
             ("ai_credits_used", "decimal(38,12)"),
+            ("client_telemetry_present", "boolean"),
+            ("usage_metrics_requirements_json", "string"),
         )
         + USER_CUSTOMIZATION_COLUMNS
         + ACTIVITY_COLUMNS
@@ -165,6 +174,7 @@ TABLE_DEFINITIONS = {
             ("used_chat", "boolean"),
             ("used_cli", "boolean"),
             ("used_copilot_app", "boolean"),
+            ("used_vscode_agent", "boolean"),
             ("used_copilot_cloud_agent", "boolean"),
             ("used_copilot_coding_agent", "boolean"),
             ("used_copilot_code_review_active", "boolean"),
@@ -196,6 +206,13 @@ TABLE_DEFINITIONS = {
             ("repository_visibility", "string"),
         )
         + PULL_REQUEST_COLUMNS
+        + (
+            ("pull_request_review_times_json", "string"),
+            ("copilot_code_review_json", "string"),
+            ("copilot_review_comments_evaluated", "bigint"),
+            ("copilot_review_comments_addressed", "bigint"),
+            ("copilot_review_merged_no_human_change_request", "bigint"),
+        )
         + LINEAGE_COLUMNS,
     },
     "user_team_memberships_daily": {
@@ -573,6 +590,8 @@ def _surface_expressions(functions):
         "copilot_app_output_tokens_sum": "$.totals_by_copilot_app.token_usage.output_tokens_sum",
         "copilot_app_prompt_tokens_sum": "$.totals_by_copilot_app.token_usage.prompt_tokens_sum",
         "copilot_app_avg_tokens_per_request": "$.totals_by_copilot_app.token_usage.avg_tokens_per_request",
+        "vscode_agent_session_count": "$.totals_by_vscode_agent.session_count",
+        "vscode_agent_total_user_messages": "$.totals_by_vscode_agent.total_user_messages",
     }
     double_columns = {
         "cli_avg_tokens_per_request",
@@ -723,6 +742,12 @@ def _enterprise_frame(prepared, functions):
             "enterprise_slug"
         ),
         enterprise_id.alias("enterprise_id"),
+        _json_long("$.missing_client_telemetry_user_count", functions).alias(
+            "missing_client_telemetry_user_count"
+        ),
+        _json_long("$.below_usage_metrics_minimum_user_count", functions).alias(
+            "below_usage_metrics_minimum_user_count"
+        ),
         *[
             _json_long(f"$.{column_name}", functions).alias(column_name)
             for column_name in active_count_names
@@ -760,6 +785,12 @@ def _user_frame(prepared, functions):
             _json_string("$.user_login", functions),
         ).alias("user_login"),
         _json_decimal("$.ai_credits_used", functions).alias("ai_credits_used"),
+        _json_boolean("$.client_telemetry_present", functions).alias(
+            "client_telemetry_present"
+        ),
+        _json_object("$.usage_metrics_requirements", functions).alias(
+            "usage_metrics_requirements_json"
+        ),
         *[
             _json_long(f"$.{column_name}", functions).alias(column_name)
             for column_name, _ in USER_CUSTOMIZATION_COLUMNS
@@ -772,6 +803,7 @@ def _user_frame(prepared, functions):
                 "used_chat",
                 "used_cli",
                 "used_copilot_app",
+                "used_vscode_agent",
                 "used_copilot_cloud_agent",
                 "used_copilot_coding_agent",
                 "used_copilot_code_review_active",
@@ -829,6 +861,20 @@ def _repository_frame(prepared, functions):
             "repository_visibility"
         ),
         *_pull_request_expressions(functions),
+        _json_object("$.pull_request_review_times", functions).alias(
+            "pull_request_review_times_json"
+        ),
+        _json_object("$.copilot_code_review", functions).alias("copilot_code_review_json"),
+        _json_long("$.copilot_code_review.total_comments_evaluated", functions).alias(
+            "copilot_review_comments_evaluated"
+        ),
+        _json_long("$.copilot_code_review.total_comments_addressed", functions).alias(
+            "copilot_review_comments_addressed"
+        ),
+        _json_long(
+            "$.copilot_code_review.total_merged_no_human_change_request_after_review",
+            functions,
+        ).alias("copilot_review_merged_no_human_change_request"),
         *_lineage_expressions(functions),
     )
 

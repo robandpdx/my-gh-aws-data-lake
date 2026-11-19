@@ -1,5 +1,6 @@
 import unittest
 from argparse import Namespace
+from unittest.mock import MagicMock, Mock, call
 
 from webhook_silver import job
 
@@ -103,6 +104,63 @@ class WebhookSilverJobTests(unittest.TestCase):
             ),
         )
         self.assertEqual(job.event_timestamp_paths("fork"), job.DEFAULT_TIMESTAMP_PATHS)
+
+    def test_promotes_issue_relationship_deliveries_without_requiring_a_related_issue(self):
+        self.assertEqual(job.event_family("issue_relates_to"), "issues")
+        self.assertIn("issue_relates_to", job.FAMILY_EVENT_TYPES["issues"])
+        self.assertEqual(
+            job.event_timestamp_paths("issue_relates_to"),
+            ("$.issue.updated_at", "$.issue.created_at"),
+        )
+        functions = MagicMock()
+        functions.length.return_value = 1
+
+        job._family_frame(Mock(), "issues", functions)
+
+        for path in (
+            "$.issue_id",
+            "$.related_issue_id",
+            "$.issue_field",
+            "$.issue_field_value",
+            "$.changes",
+        ):
+            functions.get_json_object.assert_any_call("raw_payload", path)
+
+    def test_extracts_dependabot_dependency_version_without_defaulting_missing_values(self):
+        functions = MagicMock()
+        functions.length.return_value = 1
+
+        job._family_frame(Mock(), "security_alerts", functions)
+
+        functions.get_json_object.assert_any_call(
+            "raw_payload", "$.alert.dependency.version_requirement"
+        )
+
+    def test_upgrades_existing_webhook_tables_once_and_preserves_unknown_columns(self):
+        spark = Mock()
+        existing = [
+            name for name, _ in job.TABLE_DEFINITIONS["issues"]["columns"]
+            if name != "related_issue_id"
+        ] + ["future_column"]
+        spark.table.return_value.columns = existing
+        location = "s3://example/silver/webhooks/issues/"
+
+        job.ensure_table(spark, "silver_dev", "issues", location)
+        spark.table.return_value.columns = existing + ["related_issue_id"]
+        job.ensure_table(spark, "silver_dev", "issues", location)
+
+        create = job.create_table_sql("silver_dev", "issues", location)
+        self.assertEqual(
+            spark.sql.call_args_list,
+            [
+                call(create),
+                call(
+                    "ALTER TABLE `glue_catalog`.`silver_dev`.`issues`"
+                    " ADD COLUMNS (`related_issue_id` bigint)"
+                ),
+                call(create),
+            ],
+        )
 
     def test_accepts_a_bounded_backfill_window(self):
         arguments = job.parse_job_arguments(
