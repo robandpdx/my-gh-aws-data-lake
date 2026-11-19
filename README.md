@@ -837,7 +837,67 @@ metrics, and the shared alarm topic. See
 [sample-athena-queries.md](./sample-athena-queries.md) for snapshot and inactive
 user queries.
 
-### 10. Next Steps
+### 10. Weekly GitHub Data Coverage Review
+
+The [weekly agentic workflow](./.github/workflows/weekly-github-data-coverage.md)
+reviews GitHub's changelog for the preceding seven days, follows paginated feeds
+and official documentation, and compares announcements with the actual ingestion
+code. It checks existing data paths and newly available webhook, REST, GraphQL,
+audit-log, report, and export data, including compatibility changes and
+deprecations. Comprehensive GitHub data coverage is the goal, not a statement
+that this stack already collects every available dataset.
+
+It is scheduled for **Sunday at 20:00 UTC**, equivalent to **noon PST year-round**
+(13:00 PDT during daylight saving time). GitHub Actions schedules are best-effort
+and may start late. Manual runs use the same rolling seven-day window.
+
+Each run can open at most one **draft pull request** containing validated code,
+tests, schemas, and documentation, plus one issue for blocked or deferred work.
+It checks existing proposals to avoid duplicates and reports no action when
+coverage is already sufficient. Incomplete evidence is reported explicitly,
+not treated as a successful review. New collectors remain opt-in, and all
+changes require human review. The workflow never merges or deploys changes and
+has no AWS credentials or access to live enterprise datasets.
+
+To enable it:
+
+1. Enable GitHub Actions in this repository. Under **Settings > Actions >
+   General > Workflow permissions**, enable **Allow GitHub Actions to create
+   and approve pull requests** (subject to organization policy). The agent has
+   read-only GitHub permissions; separate gh-aw safe-output jobs publish proposals.
+2. For this personal repository, create a fine-grained PAT owned by a user
+   with an active Copilot license, grant the account permission **Copilot
+   Requests: Read**, and save it as the Actions secret `COPILOT_GITHUB_TOKEN`.
+   Enter it through the GitHub secrets UI or the interactive
+   `gh aw secrets set COPILOT_GITHUB_TOKEN` prompt; never put it in a file or
+   command argument. See [gh-aw authentication](https://github.github.com/gh-aw/reference/auth/).
+3. Commit both the Markdown source and its generated
+   [lock file](./.github/workflows/weekly-github-data-coverage.lock.yml) to the
+   default branch, along with the compiler's
+   [action pins](./.github/aw/actions-lock.json). The lock file is the executable
+   GitHub Actions workflow.
+4. Optionally select **Actions > Weekly GitHub data coverage > Run workflow**
+   to verify setup without waiting until Sunday, or run:
+
+   ```bash
+   gh aw run weekly-github-data-coverage
+   ```
+
+After editing the workflow source, install the `github/gh-aw` GitHub CLI extension
+if needed, then regenerate and validate the lock file and commit both files:
+
+```bash
+gh aw compile weekly-github-data-coverage --strict --validate --actionlint
+```
+
+Compilation validates the workflow but does not run the AI review. Review run
+logs for missing evidence or test/tool failures. PRs created with the default
+`GITHUB_TOKEN` do not automatically trigger other Actions workflows; maintainers
+must run required checks before merging. See
+[gh-aw CI triggering](https://github.github.com/gh-aw/reference/triggering-ci/)
+if a separately scoped GitHub App token is needed later.
+
+### 11. Next Steps
 
 See [aws_webhook_analytics_architecture.md](./aws_webhook_analytics_architecture.md)
 for the broader webhook analytics architecture.
