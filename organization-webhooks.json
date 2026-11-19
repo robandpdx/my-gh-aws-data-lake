@@ -1,0 +1,23 @@
+[
+   {
+      "name": "web",
+      "active": true,
+      "events": [
+         "issues",
+         "issue_comment",
+         "pull_request",
+         "pull_request_review",
+         "pull_request_review_comment",
+         "code_scanning_alert",
+         "dependabot_alert",
+         "secret_scanning_alert",
+         "issue_relates_to"
+      ],
+      "config": {
+         "url": "__WEBHOOK_URL__",
+         "content_type": "json",
+         "secret": "",
+         "insecure_ssl": "0"
+      }
+   }
+]

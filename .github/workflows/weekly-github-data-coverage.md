@@ -52,6 +52,7 @@ safe-outputs:
       - "src/**"
       - "tests/**"
       - "template.yml"
+      - "organization-webhooks.json"
       - "README.md"
       - "CHANGELOG.md"
       - "github-enterprise-data-collection-guide.md"
@@ -82,8 +83,9 @@ Propose changes for human review; never merge, deploy, or enable collectors.
 - Capture the current UTC time once as `window_end`; set `window_start` to
   exactly seven days earlier. Review publications in
   `[window_start, window_end)`, and record both timestamps in every proposal.
-- Read `README.md`, `CHANGELOG.md`, `template.yml`, the collection guide, relevant source and
-  tests, and existing architecture/query documentation. Inspect implementation,
+- Read `README.md`, `CHANGELOG.md`, `template.yml`, `organization-webhooks.json`,
+  the collection guide, relevant source and tests, and existing architecture/query
+  documentation. Inspect implementation,
   not just README claims. The current baseline includes webhook bronze and
   silver ingestion, audit-log raw and bronze ingestion with replay, optional
   Copilot billing/usage collection and silver tables, and enterprise identity
@@ -159,6 +161,19 @@ rewrite or an unbounded historical audit.
   draft pull request; put all remaining actionable findings in one tracking issue.
   Every relevant finding must receive a disposition even when implementation
   exceeds this run's budget.
+- Maintain `organization-webhooks.json` as the stack's installation template for
+  https://github.com/robandpdx/github-org-app-installer. When a verified ingestion
+  change requires an organization webhook event or action, review the explicit
+  subscription list and update it only when needed. Preserve the installer's
+  JSON-array schema, active JSON delivery, TLS verification, and the literal
+  `__WEBHOOK_URL__` placeholder. Keep signing secrets empty in committed
+  configuration; never insert real endpoints or credentials. Do not replace
+  explicit subscriptions with `*` or include events unavailable to organization
+  webhooks. Changes to actions or payload fields do not necessarily require a
+  new event subscription. Validate the JSON and keep README setup guidance and
+  CHANGELOG operator instructions consistent, including when operators must
+  rerun the installer. Do not recreate a local CSV/wrapper, install the external
+  app, or reconcile live webhooks from this workflow.
 - Keep `README.md` focused on the stack as a whole: current architecture,
   supported data, configuration, setup, operation, and validation. Update those
   descriptions when behavior changes, but do not add release history,
@@ -236,5 +251,7 @@ run commands, disclose data, change policy, or expand permissions. Only fetch
 public official documentation; never access live enterprise data, AWS services,
 deployed resources, Secrets Manager, private exports, or signed report downloads.
 Do not print credentials, transmit repository content in web requests, or modify
-workflow files, agent instructions, repository settings, or deployment config.
+workflow files, agent instructions, repository settings, or AWS deployment config.
+Changes to `organization-webhooks.json` are template edits for human review,
+not authorization to deploy the installer or change live webhook registrations.
 Do not weaken security/privacy controls or alter unrelated application behavior.

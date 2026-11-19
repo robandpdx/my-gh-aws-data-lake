@@ -213,6 +213,70 @@ a GitHub App installed in those organizations:
 Use an enterprise global webhook separately when collecting enterprise-wide
 `workflow_job`, `workflow_run`, repository, and organization activity.
 
+#### Automate organization webhook installation
+
+Use [github-org-app-installer](https://github.com/robandpdx/github-org-app-installer)
+to reconcile webhooks across existing enterprise organizations and configure
+them automatically when administrators are added to organizations. Follow its
+GitHub App permission, credential, deployment, and global-enterprise-webhook
+instructions; it is a separate application, not part of this SAM stack.
+
+This repository maintains the stack-specific
+[organization-webhooks.json](./organization-webhooks.json) configuration in the
+installer's JSON-array format. It subscribes only to:
+
+- `issues`, `issue_comment`, `issue_relates_to`
+- `pull_request`, `pull_request_review`, `pull_request_review_comment`
+- `code_scanning_alert`, `dependabot_alert`, `secret_scanning_alert`
+
+The webhook is active, uses JSON payloads, and verifies TLS certificates.
+`config.url` is the placeholder `__WEBHOOK_URL__`: replace it with this stack's
+`WebhookEndpoint` output in the runtime configuration, not the committed file.
+For example, from this repository's root with AWS CLI and `jq` installed:
+
+```bash
+export DATA_LAKE_WEBHOOK_URL="$(aws cloudformation describe-stacks \
+  --stack-name <STACK_NAME> \
+  --query 'Stacks[0].Outputs[?OutputKey==`WebhookEndpoint`].OutputValue | [0]' \
+  --output text)"
+
+export ORGANIZATION_WEBHOOKS="$(jq --compact-output \
+  --arg url "$DATA_LAKE_WEBHOOK_URL" \
+  'map(.config.url = $url)' organization-webhooks.json)"
+```
+
+In the installer's checkout, configure its other documented environment
+variables, including the enterprise, installer App, and target App settings.
+It accepts `ORGANIZATION_WEBHOOKS` as either JSON or base64-encoded JSON.
+Test one organization before applying to all installable organizations:
+
+```bash
+node bin/manage-installations.js install-all --org your-test-org
+npm run install-all
+```
+
+For ongoing installation, supply the resolved configuration as the installer's
+`OrganizationWebhooks` deployment parameter and configure its global enterprise
+webhook as described in its documentation. The weekly data-coverage workflow
+maintains this repository's event definitions, but does not deploy the installer
+or reconcile live subscriptions; apply reviewed configuration updates through
+the installer yourself.
+
+The installer matches existing organization hooks by normalized destination URL,
+updates a single match, creates a missing hook, and rejects duplicate matches.
+It leaves unrelated hooks alone. Its `uninstall-all` command removes matching
+hooks and target App installations; do not use that command merely to refresh
+subscriptions. Review overlapping App and enterprise subscriptions to avoid
+duplicate logical activity.
+
+**Signing secrets:** The template's empty `config.secret` means no signing
+secret is configured. If signing is required, inject the real secret into the
+runtime JSON through an approved secret-management path; never commit it.
+The installer sends the complete payload when updating a hook, so an empty
+secret clears a previously configured secret. This stack's direct API
+Gateway-to-Firehose receiver does not validate `X-Hub-Signature-256`; signing
+deliveries alone does not make the current endpoint authenticate them.
+
 ### Troubleshooting: GitHub Shows Success but S3 Is Empty
 
 * A GitHub delivery status of **200** means API Gateway successfully submitted

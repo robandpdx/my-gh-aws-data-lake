@@ -7,6 +7,22 @@ available; upstream announcement dates are not stack deployment dates.
 
 ## Unreleased
 
+### Organization webhook installer integration
+
+- Maintain `organization-webhooks.json` for
+  [github-org-app-installer](https://github.com/robandpdx/github-org-app-installer),
+  with the nine documented issue, pull-request, relationship, and security-alert
+  events, JSON delivery, TLS verification, and a `__WEBHOOK_URL__` placeholder.
+- Document runtime URL substitution, bulk reconciliation, ongoing organization
+  setup, and the installer's full-payload signing-secret behavior. No local
+  installer wrapper or CSV configuration is required.
+- Require the weekly agent to maintain the JSON definitions alongside ingestion
+  changes while preserving placeholders and avoiding credentials or live
+  webhook mutations. Operators must apply reviewed changes through the
+  installer; no stack deployment or data migration is needed for this change.
+- This is stack configuration tooling, not a new GitHub data feature; there
+  is no corresponding GitHub changelog article.
+
 ### Documentation organization
 
 - Separate change history and migration guidance from the stack README.
