@@ -7,6 +7,33 @@ available; upstream announcement dates are not stack deployment dates.
 
 ## Unreleased
 
+### GHE.com audit-log streaming with OIDC
+
+- Add the optional `GitHubEnterpriseCloudSubdomain` deployment parameter for
+  GitHub Enterprise Cloud with data residency. When nonempty, it selects the
+  exact lowercase `https://<subdomain>.ghe.com` audit-log OIDC subject. The empty
+  default preserves the case-sensitive github.com enterprise-slug subject.
+  The provider URL, `sts.amazonaws.com` audience, and bucket-scoped
+  `s3:PutObject` permission are unchanged.
+- Source: [S3 audit-log streaming with OpenID Connect expands to GHE.com](https://github.blog/changelog/2026-11-19-s3-audit-log-streaming-with-openid-connect-expands-to-ghe-com/)
+  (GitHub announcement: November 19, 2026).
+  See GitHub's [S3 OIDC setup documentation](https://docs.github.com/enterprise-cloud@latest/admin/monitoring-activity-in-your-enterprise/reviewing-audit-logs-for-your-enterprise/streaming-the-audit-log-for-your-enterprise#setting-up-streaming-to-s3-with-openid-connect).
+- Upgrade: validate, build, and redeploy the existing stack while preserving
+  its current parameters. For GHE.com, supply only the lowercase hostname label
+  as `GitHubEnterpriseCloudSubdomain` and retain `GitHubEnterpriseSlug`. For
+  github.com, leave the new parameter empty; no stream reconfiguration is
+  required. This parameter does not change optional collectors' API endpoints.
+- A GHE.com enterprise owner must configure the S3 stream with the existing
+  bucket, Region, and writer-role outputs, then run **Check endpoint** and save.
+  Review the destination's data residency/compliance requirements first.
+  When migrating an access-key stream, revoke its old AWS credentials after
+  verifying OIDC delivery. If the subdomain changes or the enterprise is deleted,
+  remove old subjects from any other IAM trust policies; updating this stack
+  replaces only this writer role's subject.
+- No new dataset, payload fields, GitHub API permission, or secret is required.
+  Raw/bronze processing and replay formats are unchanged; no data migration or
+  backfill is required. Enabling a stream does not recover pre-stream history.
+
 ### Organization webhook installer integration
 
 - Maintain `organization-webhooks.json` for

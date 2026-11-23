@@ -43,13 +43,16 @@ This plan assumes:
 - The existing webhook pipeline remains operational and is not repurposed for
   audit-log ingestion.
 
-The GitHub enterprise slug is a deployment input. It is case-sensitive in the
-OIDC subject condition and must match the enterprise name used by GitHub.
+The GitHub enterprise slug is a deployment input. For github.com it is
+case-sensitive in the OIDC subject condition and must match the enterprise slug
+used by GitHub.
 
-GitHub Enterprise Cloud with data residency currently does not support audit
-log streaming to S3 with OIDC. For that case, use the documented access-key
-method temporarily, store the credential outside source control, rotate it,
-and replace it with OIDC when GitHub makes the feature available.
+GitHub Enterprise Cloud with data residency (GHE.com) also supports S3 streaming
+with OIDC. Set `GitHubEnterpriseCloudSubdomain` to the lowercase subdomain from
+the enterprise URL, without a scheme or `.ghe.com` suffix. Leave it empty for
+github.com. This changes audit-log trust only, not optional REST collectors'
+API endpoints. Review the S3 destination's region against data residency and
+compliance requirements before exporting audit data.
 
 ## Source behavior that governs the design
 
@@ -171,6 +174,18 @@ the exact subject:
 ```text
 https://github.com/<ENTERPRISE_SLUG>
 ```
+
+For GHE.com, a nonempty `GitHubEnterpriseCloudSubdomain` instead selects:
+
+```text
+https://<subdomain>.ghe.com
+```
+
+The role trusts exactly one subject, not both domains or a wildcard. Use the
+lowercase GHE.com subdomain exactly as it appears in the enterprise URL, not
+the display name. The issuer and audience stay the same. If a subdomain changes
+or an enterprise is deleted, remove old subjects from any other IAM trust
+policies as well.
 
 The role grants only:
 
@@ -887,6 +902,8 @@ Set the case-sensitive GitHub enterprise slug before deployment:
 
 ```bash
 export GITHUB_ENTERPRISE_SLUG="your-enterprise-slug"
+# For GHE.com audit-log OIDC, use only the lowercase subdomain; otherwise empty.
+export GITHUB_ENTERPRISE_CLOUD_SUBDOMAIN=""
 # Set true only in an account where the provider does not exist yet.
 export CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER="false"
 
@@ -898,6 +915,7 @@ sam deploy --guided \
     Environment=dev \
     owner=robandpdx \
     GitHubEnterpriseSlug="$GITHUB_ENTERPRISE_SLUG" \
+    GitHubEnterpriseCloudSubdomain="$GITHUB_ENTERPRISE_CLOUD_SUBDOMAIN" \
     CreateGitHubAuditLogOidcProvider="$CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER" \
   --capabilities CAPABILITY_IAM
 ```
@@ -913,7 +931,8 @@ aws iam list-open-id-connect-providers \
 Use `false` when this returns an ARN and `true` when it returns no result.
 
 For subsequent deployments, ensure the guided values saved to
-`samconfig.toml` include `GitHubEnterpriseSlug`.
+`samconfig.toml` include `GitHubEnterpriseSlug` and the selected
+`GitHubEnterpriseCloudSubdomain`.
 
 ### 2. Capture stack outputs
 

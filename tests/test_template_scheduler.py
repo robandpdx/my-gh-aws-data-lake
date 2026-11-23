@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,61 @@ TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "template.yml"
 
 
 class SchedulerTemplateTests(unittest.TestCase):
+    def test_audit_log_oidc_trust_selects_one_exact_enterprise_subject(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+        role = template.split("  GitHubAuditLogWriterRole:\n", 1)[1].split(
+            "      Policies:\n", 1
+        )[0]
+
+        self.assertIn(
+            "  HasGitHubEnterpriseCloudSubdomain:\n"
+            "    Fn::Not:\n"
+            "      - Fn::Equals:\n"
+            "          - Ref: GitHubEnterpriseCloudSubdomain\n"
+            "          - ''",
+            template,
+        )
+        self.assertIn(
+            "oidc-configuration.audit-log.githubusercontent.com:aud: sts.amazonaws.com",
+            role,
+        )
+        self.assertIn(
+            "                oidc-configuration.audit-log.githubusercontent.com:sub:\n"
+            "                  Fn::If:\n"
+            "                    - HasGitHubEnterpriseCloudSubdomain\n"
+            '                    - Fn::Sub: "https://${GitHubEnterpriseCloudSubdomain}.ghe.com"\n'
+            '                    - Fn::Sub: "https://github.com/${GitHubEnterpriseSlug}"',
+            role,
+        )
+        self.assertNotIn("StringLike", role)
+        self.assertNotIn("*", role)
+
+    def test_ghe_subdomain_is_optional_and_rejects_non_host_label_values(self):
+        template = TEMPLATE_PATH.read_text(encoding="utf-8")
+        parameter = re.search(
+            r"  GitHubEnterpriseCloudSubdomain:\n((?:    .*\n)+)", template
+        )
+        self.assertIsNotNone(parameter)
+        if parameter is None:
+            return
+        settings = parameter.group(1)
+        self.assertIn("Default: ''", settings)
+        self.assertIn("MaxLength: 63", settings)
+        pattern = re.search(r"AllowedPattern: '([^']+)'", settings)
+        self.assertIsNotNone(pattern)
+        if pattern is None:
+            return
+
+        for value in ("", "octocorp", "octo-corp", "a", "123"):
+            with self.subTest(valid=value):
+                self.assertIsNotNone(re.fullmatch(pattern.group(1), value))
+        for value in (
+            "Octocorp", "octo_corp", "-octocorp", "octocorp-",
+            "octocorp.ghe.com", "https://octocorp.ghe.com", "*", "octocorp/path",
+        ):
+            with self.subTest(invalid=value):
+                self.assertIsNone(re.fullmatch(pattern.group(1), value))
+
     def test_shared_data_lake_bucket_has_source_neutral_name(self):
         template = TEMPLATE_PATH.read_text(encoding="utf-8")
 

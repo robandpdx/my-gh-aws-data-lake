@@ -16,7 +16,14 @@ Parameters:
     Type: String
     AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$'
     ConstraintDescription: Enter the case-sensitive GitHub enterprise slug.
-    Description: Case-sensitive enterprise slug used to restrict GitHub audit-log OIDC access.
+    Description: Case-sensitive enterprise slug for collectors and github.com audit-log OIDC access.
+  GitHubEnterpriseCloudSubdomain:
+    Type: String
+    Default: ''
+    MaxLength: 63
+    AllowedPattern: '^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)?$'
+    ConstraintDescription: Leave empty for github.com or enter only the lowercase GHE.com subdomain, without a scheme or domain suffix.
+    Description: Optional GHE.com subdomain used instead of the enterprise slug for audit-log OIDC trust only.
   CreateGitHubAuditLogOidcProvider:
     Type: String
     Default: 'false'
@@ -116,6 +123,11 @@ Rules:
         AssertDescription: GitHubIdentitySecretArn must reference an existing secret when identity collection is enabled.
 
 Conditions:
+  HasGitHubEnterpriseCloudSubdomain:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: GitHubEnterpriseCloudSubdomain
+          - ''
   ShouldCreateGitHubAuditLogOidcProvider:
     Fn::Equals:
       - Ref: CreateGitHubAuditLogOidcProvider
@@ -969,7 +981,11 @@ Resources:
             Condition:
               StringEquals:
                 oidc-configuration.audit-log.githubusercontent.com:aud: sts.amazonaws.com
-                oidc-configuration.audit-log.githubusercontent.com:sub: !Sub "https://github.com/${GitHubEnterpriseSlug}"
+                oidc-configuration.audit-log.githubusercontent.com:sub:
+                  Fn::If:
+                    - HasGitHubEnterpriseCloudSubdomain
+                    - Fn::Sub: "https://${GitHubEnterpriseCloudSubdomain}.ghe.com"
+                    - Fn::Sub: "https://github.com/${GitHubEnterpriseSlug}"
       Policies:
         - PolicyName: GitHubAuditLogS3WritePolicy
           PolicyDocument:

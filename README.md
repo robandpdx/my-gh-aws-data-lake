@@ -148,6 +148,9 @@ From the repository root, validate and build the template, then deploy it using 
 
 ```bash
 export GITHUB_ENTERPRISE_SLUG="your-case-sensitive-enterprise-slug"
+# For GHE.com audit-log OIDC only, set the lowercase subdomain (e.g. "octocorp").
+# Leave empty for github.com; do not include "https://" or ".ghe.com".
+export GITHUB_ENTERPRISE_CLOUD_SUBDOMAIN=""
 # Keep false when the account already has this account-global OIDC provider.
 export CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER="false"
 # Optional; leave empty to create the alarm topic without an email subscriber.
@@ -161,6 +164,7 @@ sam deploy --guided \
     Environment=dev \
     owner=robandpdx \
     GitHubEnterpriseSlug="$GITHUB_ENTERPRISE_SLUG" \
+    GitHubEnterpriseCloudSubdomain="$GITHUB_ENTERPRISE_CLOUD_SUBDOMAIN" \
     CreateGitHubAuditLogOidcProvider="$CREATE_GITHUB_AUDIT_LOG_OIDC_PROVIDER" \
     AuditLogAlarmEmail="$AUDIT_LOG_ALARM_EMAIL" \
     AuditLogNormalizerReservedConcurrency=2 \
@@ -176,6 +180,14 @@ the account-global GitHub audit-log OIDC provider by default. Set
 already exist. The guided deployment stores the parameter values for later
 deployments. When an alarm email is supplied, confirm the Amazon SNS
 subscription message before expecting notifications.
+
+For GitHub Enterprise Cloud with data residency, set
+`GitHubEnterpriseCloudSubdomain` to the lowercase subdomain from your enterprise
+URL. The writer role then trusts only `https://<subdomain>.ghe.com`; when empty,
+it trusts only `https://github.com/<GitHubEnterpriseSlug>`, preserving the slug's
+case. Both use the same audit-log OIDC provider and `sts.amazonaws.com` audience.
+This parameter changes audit-log OIDC trust only; it does not switch the optional
+REST collectors to GHE.com endpoints. Keep supplying `GitHubEnterpriseSlug`.
 
 Copilot collection remains disabled unless `EnableCopilotCollection=true` and
 `CopilotGitHubAppSecretArn` names an existing Secrets Manager secret. See
@@ -320,6 +332,10 @@ Use the `AuditLogS3BucketName`, `AuditLogS3Region`, and
 with OpenID Connect in the GitHub enterprise settings. The raw bucket is
 versioned and retained if the stack is deleted. GitHub receives only
 `s3:PutObject` permission for that bucket.
+
+For GHE.com, confirm that the bucket and AWS Region meet your enterprise's data
+residency requirements before enabling the stream. OIDC authentication does not
+keep exported data inside the enterprise's GitHub residency region.
 
 See [github_audit_log_analytics_plan.md](./github_audit_log_analytics_plan.md)
 for setup, verification, normalization, Iceberg joins, Grafana serving,
