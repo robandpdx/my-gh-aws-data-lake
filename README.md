@@ -768,13 +768,23 @@ It is scheduled for **Sunday at 20:00 UTC**, equivalent to **noon PST year-round
 (13:00 PDT during daylight saving time). GitHub Actions schedules are best-effort
 and may start late. Manual runs use the same rolling seven-day window.
 
-Each run can open at most one **draft pull request** containing validated code,
-tests, schemas, and documentation, plus one issue for blocked or deferred work.
-It checks existing proposals to avoid duplicates and reports no action when
-coverage is already sufficient. Incomplete evidence is reported explicitly,
+Each run implements safe, evidence-backed gaps in at most one **draft pull
+request** containing validated code, tests, schemas, and documentation, plus one
+issue for genuinely blocked or budget-deferred work. Unimplemented findings in
+earlier tracking issues remain eligible for implementation, even outside the
+current changelog window; an issue alone does not count as an implementing PR.
+It checks existing proposals to avoid duplicate issues and PRs and reports no
+action when coverage is already sufficient. Incomplete evidence is reported explicitly,
 not treated as a successful review. New collectors remain opt-in, and all
 changes require human review. The workflow never merges or deploys changes and
 has no AWS credentials or access to live enterprise datasets.
+
+Before agent execution, deterministic setup steps install SAM CLI, cfn-lint,
+and the collector's declared dependencies in an isolated Python environment and
+lint the baseline template offline. The agent reruns infrastructure validation
+with `python3 -m samcli validate --lint --region us-east-1`, using its allowlisted
+Python command rather than requiring interactive approval for a separate SAM
+shell command. Relevant checks must pass before it publishes a code PR.
 
 To enable it:
 

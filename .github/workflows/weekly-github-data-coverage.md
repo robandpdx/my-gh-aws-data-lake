@@ -1,5 +1,5 @@
 ---
-description: Review the past week's GitHub changelog and propose data lake ingestion updates.
+description: Review GitHub's changelog and implement data lake ingestion updates in a draft PR.
 intent: Keep this stack's GitHub data coverage comprehensive and compatible as GitHub evolves.
 on:
   schedule:
@@ -13,6 +13,17 @@ engine: copilot
 strict: true
 timeout-minutes: 45
 max-turns: 150
+env:
+  SAM_CLI_TELEMETRY: "0"
+  AWS_EC2_METADATA_DISABLED: "true"
+steps:
+  - name: Install validation dependencies
+    run: |
+      python3 -m venv "$RUNNER_TEMP/coverage-validation"
+      "$RUNNER_TEMP/coverage-validation/bin/python3" -m pip install aws-sam-cli cfn-lint -r src/copilot_collector/requirements.txt
+      echo "$RUNNER_TEMP/coverage-validation/bin" >> "$GITHUB_PATH"
+  - name: Verify offline SAM validation
+    run: python3 -m samcli validate --lint --region us-east-1
 network:
   allowed:
     - defaults
@@ -33,7 +44,6 @@ tools:
     - "grep:*"
     - "rg:*"
     - "python3:*"
-    - "sam validate:*"
     - "git diff:*"
     - "git status:*"
     - "git log:*"
@@ -76,7 +86,9 @@ not a claim that the current stack already collects everything.
 
 Run on Sundays at 20:00 UTC: noon PST (UTC-08:00) year-round, or 13:00 PDT
 during daylight saving time. Manual runs perform the same rolling-week review.
-Propose changes for human review; never merge, deploy, or enable collectors.
+Implement safe changes and open a draft PR for human review; an issue alone is
+not a completed outcome when a finding can be implemented and validated.
+Never merge, deploy, or enable collectors.
 
 ## 1. Establish the evidence window and repository baseline
 
@@ -94,6 +106,13 @@ Propose changes for human review; never merge, deploy, or enable collectors.
   closed proposals for each candidate's canonical changelog URL and affected
   endpoint/event/dataset, including proposals without this workflow's title
   prefix. Read relevant review feedback and closure reasons.
+- Treat unresolved findings in this workflow's previous tracking issues as an
+  implementation backlog, including findings announced before this week's
+  window. Reverify their official evidence, current code, and blockers. An open
+  tracking issue without an implementing PR is not duplicate implementation
+  work: implement it when its blockers can now be resolved. Preserve the
+  original announcement dates and distinguish backlog work from this week's
+  announcements in the run summary.
 
 ## 2. Read the entire week's GitHub changelog
 
@@ -155,12 +174,15 @@ rewrite or an unbounded historical audit.
 
 ## 4. Implement safe, evidence-backed changes
 
-- For novel, implementable gaps, make the smallest coherent changes to source,
+- For implementable gaps, including unimplemented tracked findings, make the
+  smallest coherent changes to source,
   SAM infrastructure, regression tests, collection/setup documentation, schemas,
-  and sample Athena queries as needed. Group compatible changes into at most one
-  draft pull request; put all remaining actionable findings in one tracking issue.
-  Every relevant finding must receive a disposition even when implementation
-  exceeds this run's budget.
+  and sample Athena queries as needed. Prioritize completing and validating a
+  coherent change over producing an issue containing implementation suggestions.
+  Group compatible changes into at most one draft pull request. Use a tracking
+  issue only for genuinely blocked or budget-deferred work, with the exact
+  reason it could not be implemented. Every relevant finding must receive a
+  disposition even when implementation exceeds this run's budget.
 - Maintain `organization-webhooks.json` as the stack's installation template for
   https://github.com/robandpdx/github-org-app-installer. When a verified ingestion
   change requires an organization webhook event or action, review the explicit
@@ -207,9 +229,16 @@ rewrite or an unbounded historical audit.
   payloads without new fields and replay/deduplication where relevant.
   Run the smallest relevant `python3 -m unittest discover -s tests -p
   'test_<affected_area>.py'` selections. For infrastructure changes, also run
-  `sam validate --lint`. Install dependencies from existing manifests, or
-  validation tools, only if missing; do not install arbitrary fetched code.
-  Report exact commands and results, including skipped Spark/live checks.
+  `python3 -m samcli validate --lint --region us-east-1`. The setup steps install
+  SAM CLI, cfn-lint, and the collector's declared dependencies in an isolated
+  environment on PATH and validate the baseline before agent execution.
+  Invoke validation through the allowlisted `python3` command, directly from
+  the workspace, without a `cd` prefix or output-truncating pipelines; preserve
+  its exit status and diagnostics. Do not retry denied commands unchanged or
+  abandon an implementable finding without trying the documented invocation.
+  Install additional dependencies from existing manifests, or validation tools,
+  only if missing; do not install arbitrary fetched code. Report exact commands
+  and results, including skipped Spark/live checks.
 - Never publish a code PR with failing relevant tests or invalid infrastructure.
   If validation cannot be completed, put the proposed design and the exact
   blocker in the tracking issue instead; do not claim validation succeeded.
@@ -224,12 +253,18 @@ rewrite or an unbounded historical audit.
   Include each key as `<!-- github-data-coverage: URL | source-id -->` in the
   proposal body. Search for the canonical URL as well, since search may not
   index punctuation in HTML comments.
-- Do not duplicate open work, merged fixes, or explicitly declined proposals.
-  Link to the existing item in the run summary. A genuinely different follow-up
-  needs new evidence and an explanation of what remains uncovered.
+- Do not duplicate an existing implementing PR, merged fix, tracking issue, or
+  explicitly declined proposal. Implementing a finding from an existing issue
+  in its first PR is not a duplicate: link the issue and finding keys in the PR
+  and summary. Use `Closes #<number>` only if the PR resolves the entire issue;
+  otherwise use `Refs #<number>` and identify the remaining findings. A genuinely
+  different follow-up needs new evidence and an explanation of what remains
+  uncovered.
   Do not skip the whole weekly review merely because an older proposal is open.
 - Use `create_pull_request` only for tested code changes, with a descriptive
-  title. Include the UTC window, cited changelog/documentation URLs and dates,
+  title. If a safe, validated change is ready, call it before publishing any
+  tracking issue; do not stop after describing the implementation in an issue.
+  Include the UTC window, cited changelog/documentation URLs and dates,
   current coverage and exact gap, changed datasets/fields, compatibility and
   migration/backfill considerations, tests/results, cost/privacy/permission
   implications, and required human setup. The PR must remain a draft.
@@ -238,8 +273,10 @@ rewrite or an unbounded historical audit.
   Include finding keys, evidence, proposed approach, blockers, acceptance
   criteria, and links to any related draft PR. Use a descriptive stable title
   for the same set of findings so title deduplication can suppress reruns.
-- If all findings are already handled or no action is justified after a complete
-  review, call `noop` with the window, coverage counts, and concise reasons.
+- If all findings, including the implementation backlog, are already handled or
+  no action is justified after a complete review, call `noop` with the window,
+  coverage counts, and concise reasons. Do not call `noop` after creating a PR
+  or issue.
   Missing evidence is a diagnostic, not a successful no-op. Finish every run
   with a concise coverage/disposition summary and links to outputs or duplicates.
 
